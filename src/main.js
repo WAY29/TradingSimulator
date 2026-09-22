@@ -4,10 +4,12 @@ import {
   cancelPaperOrder,
   closePaperPosition,
   createPaperAccount,
+  normalizePaperAccount,
   paperSummary,
   placePaperOrder,
   positionProtection,
   processPaperBar,
+  projectedPnl,
   resetPaperAccount,
 } from './paper.js'
 import '@klinecharts/pro/dist/klinecharts-pro.css'
@@ -177,6 +179,7 @@ document.querySelector('#app').innerHTML = `
 
 let chart
 let coreChart
+let tradeLayerFrame = null
 let liveSubscriber = null
 let searchTimer = null
 let persistTimer = null
@@ -300,7 +303,7 @@ function renderChart() {
     drawingBarVisible: true, symbol: chartSymbol(state.symbol), period, periods: [period],
     mainIndicators: ['MA'], subIndicators: ['VOL'], datafeed: replayDatafeed,
   })
-  window.requestAnimationFrame(bindChartInteractions)
+  bindChartInteractions()
 }
 
 function bindChartInteractions() {
@@ -315,6 +318,9 @@ function bindChartInteractions() {
     state.selectionTimestamp = timestamp
     positionReplaySelector(timestamp)
   })
+  ;[ActionType.OnZoom, ActionType.OnScroll, ActionType.OnVisibleRangeChange, ActionType.OnPaneDrag]
+    .forEach((type) => coreChart.subscribeAction(type, syncTradeLayerPosition))
+  root.addEventListener('wheel', syncTradeLayerPosition, { passive: true })
   root.addEventListener('mousemove', (event) => {
     if (state.mode !== 'select') return
     const timestamp = pointerTimestamp(event, root)
@@ -328,6 +334,7 @@ function bindChartInteractions() {
     if (timestamp) selectReplayBar(timestamp)
   })
   root.addEventListener('contextmenu', (event) => openChartContextMenu(event, root))
+  renderTradeLayer()
 }
 
 function pointerTimestamp(event, root) {
@@ -405,6 +412,7 @@ function applyPaperState(saved) {
     orderHistory: saved.paper.orderHistory || [],
     trades: saved.paper.trades || [],
   }
+  normalizePaperAccount(state.paper)
   state.paperTab = saved.session.paperTab || 'positions'
   state.paperPanelOpen = Boolean(saved.session.paperPanelOpen)
   if (saved.session.mode === 'replay' && validSymbol(saved.session.symbol) && TIMEFRAMES.some(({ id }) => id === saved.session.timeframe)) {
@@ -470,7 +478,7 @@ function queuePaperStateSave() {
 
 function updateReplayView() {
   renderPaperPanel()
-  window.requestAnimationFrame(renderTradeLayer)
+  renderTradeLayer()
   updateMarketDetails()
   document.querySelector('#play').disabled = state.mode !== 'replay' || state.replayHead >= state.replayEnd
   document.querySelector('#step-forward').disabled = state.mode !== 'replay' || state.replayHead >= state.replayEnd
@@ -494,12 +502,12 @@ function renderPaperPanel() {
   document.querySelector('#paper-account').innerHTML = [
     ['Account balance', summary.balance],
     ['Equity', summary.equity],
-    ['Realized P&L', summary.realizedPnl],
-    ['Unrealized P&L', summary.unrealizedPnl],
+    ['Realized PnL', summary.realizedPnl],
+    ['Unrealized PnL', summary.unrealizedPnl],
     ['Available funds', summary.availableFunds],
     ['Orders margin', summary.ordersMargin],
   ].map(([label, value], index) => `
-    <span><small>${label}${index === 0 ? '<button class="balance-reset" data-reset-balance title="重置模拟账户" aria-label="重置模拟账户">↻</button>' : ''}</small><strong class="${label.includes('P&L') ? signClass(value) : ''}">${formatMoney(value)}</strong></span>
+    <span><small>${label}${index === 0 ? '<button class="balance-reset" data-reset-balance title="重置模拟账户" aria-label="重置模拟账户">↻</button>' : ''}</small><strong class="${label.includes('PnL') ? signClass(value) : ''}">${formatMoney(value)}</strong></span>
   `).join('')
   document.querySelector('#positions-count').textContent = state.paper.position.quantity ? '1' : '0'
   document.querySelector('#orders-count').textContent = state.paper.orders.length
@@ -521,13 +529,14 @@ function positionsTable(price) {
   if (!position.quantity) return paperEmpty('No positions')
   const protection = positionProtection(state.paper)
   const pnl = position.quantity * (price - position.averagePrice)
+  const pnlPercent = pnl / Math.abs(position.quantity * position.averagePrice) * 100
   return `
-    <div class="paper-grid position-grid paper-grid-head"><span>Symbol</span><span>Side</span><span>Quantity</span><span>Avg fill price</span><span>Take profit</span><span>Stop loss</span><span>Last price</span><span>Unrealized P&L</span><span></span></div>
+    <div class="paper-grid position-grid paper-grid-head"><span>Symbol</span><span>Side</span><span>Quantity</span><span>Avg fill price</span><span>Take profit</span><span>Stop loss</span><span>Last price</span><span>Unrealized PnL</span><span>Unrealized PnL %</span><span></span></div>
     <div class="paper-grid position-grid">
       <strong>${state.symbol.id}</strong><span class="${position.quantity > 0 ? 'positive' : 'negative'}">${position.quantity > 0 ? 'Long' : 'Short'}</span>
-      <span>${formatQuantity(Math.abs(position.quantity))}</span><span>${formatPrice(position.averagePrice)}</span>
+      <span>${formatOrderQuantity(Math.abs(position.quantity), state.symbol.symbol)}</span><span>${formatPrice(position.averagePrice)}</span>
       <span>${protection.takeProfit == null ? '—' : formatPrice(protection.takeProfit)}</span><span>${protection.stopLoss == null ? '—' : formatPrice(protection.stopLoss)}</span>
-      <span>${formatPrice(price)}</span><span class="${signClass(pnl)}">${formatMoney(pnl)}</span>
+      <span>${formatPrice(price)}</span><span class="${signClass(pnl)}">${formatMoney(pnl)}</span><span class="${signClass(pnlPercent)}">${formatPnlPercent(pnlPercent)}</span>
       <button class="table-action" data-close-position title="平仓" aria-label="平仓">×</button>
     </div>`
 }
@@ -539,7 +548,7 @@ function ordersTable(orders, cancellable) {
     ${orders.map((order) => `
       <div class="paper-grid order-grid">
         <strong>${order.symbol}</strong><span class="${order.side === 'buy' ? 'positive' : 'negative'}">${order.side === 'buy' ? 'Buy' : 'Sell'}</span>
-        <span>${orderTypeLabel(order)}</span><span>${formatQuantity(order.quantity)}</span><span>${formatPrice(order.price)}</span>
+        <span>${orderTypeLabel(order)}</span><span>${formatOrderQuantity(order.quantity, order.symbol)}</span><span>${formatPrice(order.price)}</span>
         <span>${order.fillPrice == null ? '—' : formatPrice(order.fillPrice)}</span><span>${order.takeProfit == null ? '—' : formatPrice(order.takeProfit)}</span><span>${order.stopLoss == null ? '—' : formatPrice(order.stopLoss)}</span><span class="order-status ${order.status}">${order.status}</span>
         <span>${formatTimestamp(order.createdAt)}</span>${cancellable ? `<button class="table-action" data-cancel-order="${order.id}" title="取消订单" aria-label="取消订单">×</button>` : '<span></span>'}
       </div>`).join('')}`
@@ -548,11 +557,11 @@ function ordersTable(orders, cancellable) {
 function tradesTable(trades) {
   if (!trades.length) return paperEmpty('No trades')
   return `
-    <div class="paper-grid trade-grid paper-grid-head"><span>Symbol</span><span>Side</span><span>Type</span><span>Quantity</span><span>Fill price</span><span>Fee</span><span>Realized P&L</span><span>Time</span></div>
+    <div class="paper-grid trade-grid paper-grid-head"><span>Symbol</span><span>Side</span><span>Type</span><span>Quantity</span><span>Fill price</span><span>Fee</span><span>Realized PnL</span><span>Time</span></div>
     ${trades.map((trade) => trade.event === 'balance-reset' ? `
       <div class="paper-grid trade-grid trade-reset"><strong>Paper Trading</strong><span>Reset Balance</span><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span><span>${formatTimestamp(trade.timestamp)}</span></div>` : `
       <div class="paper-grid trade-grid"><strong>${trade.symbol}</strong><span class="${trade.side === 'buy' ? 'positive' : 'negative'}">${trade.side === 'buy' ? 'Buy' : 'Sell'}</span>
-        <span>${orderTypeLabel(trade)}</span><span>${formatQuantity(trade.quantity)}</span><span>${formatPrice(trade.price)}</span>
+        <span>${orderTypeLabel(trade)}</span><span>${formatOrderQuantity(trade.quantity, trade.symbol)}</span><span>${formatPrice(trade.price)}</span>
         <span>${formatMoney(trade.fee)}</span><span class="${signClass(trade.realizedPnl)}">${formatMoney(trade.realizedPnl)}</span><span>${formatTimestamp(trade.timestamp)}</span></div>
     `).join('')}`
 }
@@ -939,7 +948,7 @@ function openChartContextMenu(event, root) {
 }
 
 function contextOrderButton({ side, type }, price) {
-  return `<button data-context="draft" data-side="${side}" data-type="${type}"><b class="${side === 'buy' ? 'positive' : 'negative'}">${side === 'buy' ? 'Buy' : 'Sell'}</b> 0.01 ${state.symbol.symbol} @ ${formatPrice(price)} ${type}</button>`
+  return `<button data-context="draft" data-side="${side}" data-type="${type}"><b class="${side === 'buy' ? 'positive' : 'negative'}">${side === 'buy' ? 'Buy' : 'Sell'}</b> 0.01 ${baseCurrency(state.symbol.symbol)} @ ${formatPrice(price)} ${type}</button>`
 }
 
 function closeChartContextMenu() {
@@ -982,15 +991,86 @@ function renderTradeLayer() {
   const html = []
   if (position.quantity) {
     const pnl = position.quantity * (price - position.averagePrice)
-    html.push(`<div class="trade-line position-line" data-price="${position.averagePrice}"><span>${formatQuantity(Math.abs(position.quantity))} ${position.quantity > 0 ? 'Long' : 'Short'} · <b class="${signClass(pnl)}">${formatMoney(pnl)}</b></span></div>`)
+    const groups = [...new Set(state.paper.orders.filter(({ reduceOnly }) => reduceOnly).map(({ groupId }) => groupId).filter(Boolean))].join(',')
+    html.push(orderLine({
+      classes: 'position-line',
+      price: position.averagePrice,
+      segments: [
+        groups && { text: groups, className: 'order-sequence' },
+        { text: `${formatOrderQuantity(Math.abs(position.quantity), state.symbol.symbol)} ${position.quantity > 0 ? 'Long' : 'Short'}` },
+        { text: formatMoney(pnl), className: signClass(pnl) },
+      ].filter(Boolean),
+      showPrice: false,
+    }))
   }
   state.paper.orders.forEach((order) => {
-    html.push(`<div class="trade-line working-line ${order.role}" data-price="${order.price}"><span>${formatQuantity(order.quantity)} ${orderTypeLabel(order)} · ${formatPrice(order.price)}</span><button data-cancel-order="${order.id}" title="取消订单" aria-label="取消订单">×</button></div>`)
+    html.push(workingOrderLines(order, position))
   })
   if (state.orderDraft) html.push(draftLines(state.orderDraft))
   layer.innerHTML = html.join('')
-  layer.querySelectorAll('.trade-line[data-price]').forEach(positionTradeLine)
-  layer.querySelectorAll('.protection-zone').forEach(positionProtectionZone)
+  positionTradeLayerElements()
+}
+
+function workingOrderLines(order, position) {
+  if (order.role !== 'entry') {
+    const side = position.quantity > 0 ? 'buy' : 'sell'
+    const pnl = projectedPnl(side, order.quantity, position.averagePrice, order.price)
+    return protectionOrderLine(order.role, order.price, order.groupId, pnl, `data-cancel-order="${order.id}"`, `data-protection-order="${order.id}"`)
+  }
+
+  const brackets = [
+    order.takeProfit == null ? '' : '<span class="order-bracket take-profit">TP</span>',
+    order.stopLoss == null ? '' : '<span class="order-bracket stop-loss">SL</span>',
+  ].join('')
+  const entry = orderLine({
+    classes: `entry-order ${order.side}`,
+    price: order.price,
+    prefix: brackets,
+    segments: [
+      { text: order.groupId, className: 'order-sequence' },
+      { text: `${order.side === 'buy' ? 'Buy' : 'Sell'} ${order.type}` },
+    ],
+    actionAttributes: `data-cancel-order="${order.id}"`,
+  })
+  const takeProfit = order.takeProfit == null ? '' : protectionOrderLine(
+    'take-profit', order.takeProfit, order.groupId,
+    projectedPnl(order.side, order.quantity, order.price, order.takeProfit),
+    `data-remove-order-protection="${order.id}" data-protection-field="takeProfit"`,
+    `data-protection-parent="${order.id}" data-protection-field="takeProfit"`,
+  )
+  const stopLoss = order.stopLoss == null ? '' : protectionOrderLine(
+    'stop-loss', order.stopLoss, order.groupId,
+    projectedPnl(order.side, order.quantity, order.price, order.stopLoss),
+    `data-remove-order-protection="${order.id}" data-protection-field="stopLoss"`,
+    `data-protection-parent="${order.id}" data-protection-field="stopLoss"`,
+  )
+  return takeProfit + stopLoss + entry
+}
+
+function protectionOrderLine(role, price, groupId, pnl, buttonAttributes, dragAttributes) {
+  return orderLine({
+    classes: role,
+    price,
+    segments: [
+      { text: groupId, className: 'order-sequence' },
+      { text: formatProjectedPnl(pnl) },
+    ],
+    actionAttributes: buttonAttributes,
+    attributes: dragAttributes,
+  })
+}
+
+function orderLine({ classes, price, segments, prefix = '', actionAttributes = '', attributes = '', showPrice = true }) {
+  return `<div class="trade-line working-line ${classes}" data-price="${price}" ${attributes}>
+    <div class="working-controls">${prefix}${lineControl(segments, actionAttributes)}</div>
+    ${showPrice ? `<strong class="line-price">${formatPrice(price)}</strong>` : ''}
+  </div>`
+}
+
+function lineControl(segments, actionAttributes) {
+  const content = segments.map(({ text, className = '' }) => `<b class="${className}">${text}</b>`).join('')
+  const action = actionAttributes ? `<button ${actionAttributes} title="取消订单" aria-label="取消订单">×</button>` : ''
+  return `<span class="working-control">${content}${action}</span>`
 }
 
 function draftLines(draft) {
@@ -1000,7 +1080,7 @@ function draftLines(draft) {
         <button class="draft-submit ${draft.side}" data-submit-draft>${draft.side === 'buy' ? 'Buy' : 'Sell'}</button>
         <button class="protection-toggle ${draft.takeProfit != null ? 'active' : ''}" data-toggle-protection="takeProfit">TP</button>
         <button class="protection-toggle ${draft.stopLoss != null ? 'active' : ''}" data-toggle-protection="stopLoss">SL</button>
-        <input data-draft-quantity type="number" min="0.0001" step="0.0001" value="${draft.quantity}" aria-label="下单数量">
+        <label class="draft-quantity"><input data-draft-quantity type="number" min="0.0001" step="0.0001" value="${draft.quantity}" aria-label="下单数量"><span>${baseCurrency(state.symbol.symbol)}</span></label>
         <select data-draft-type aria-label="订单类型">
           <option value="market" ${draft.type === 'market' ? 'selected' : ''}>Market</option>
           <option value="limit" ${draft.type === 'limit' ? 'selected' : ''}>Limit</option>
@@ -1010,9 +1090,28 @@ function draftLines(draft) {
       </div>
       <strong>${formatPrice(draft.price)}</strong>
     </div>`
-  const tp = draft.takeProfit == null ? '' : `<div class="protection-zone take-profit-zone" data-entry="${draft.price}" data-target="${draft.takeProfit}"></div><div class="trade-line protection-line take-profit" data-price="${draft.takeProfit}" data-draft-role="takeProfit"><span>TP ${formatPrice(draft.takeProfit)} <button data-remove-protection="takeProfit" aria-label="移除止盈">×</button></span></div>`
-  const sl = draft.stopLoss == null ? '' : `<div class="protection-zone stop-loss-zone" data-entry="${draft.price}" data-target="${draft.stopLoss}"></div><div class="trade-line protection-line stop-loss" data-price="${draft.stopLoss}" data-draft-role="stopLoss"><span>SL ${formatPrice(draft.stopLoss)} <button data-remove-protection="stopLoss" aria-label="移除止损">×</button></span></div>`
+  const tp = draft.takeProfit == null ? '' : `<div class="protection-zone take-profit-zone" data-entry="${draft.price}" data-target="${draft.takeProfit}"></div><div class="trade-line protection-line take-profit" data-price="${draft.takeProfit}" data-draft-role="takeProfit"><span>TP · ${formatProjectedPnl(projectedPnl(draft.side, draft.quantity, draft.price, draft.takeProfit))} <button data-remove-protection="takeProfit" aria-label="移除止盈">×</button></span></div>`
+  const sl = draft.stopLoss == null ? '' : `<div class="protection-zone stop-loss-zone" data-entry="${draft.price}" data-target="${draft.stopLoss}"></div><div class="trade-line protection-line stop-loss" data-price="${draft.stopLoss}" data-draft-role="stopLoss"><span>SL · ${formatProjectedPnl(projectedPnl(draft.side, draft.quantity, draft.price, draft.stopLoss))} <button data-remove-protection="stopLoss" aria-label="移除止损">×</button></span></div>`
   return tp + sl + entry
+}
+
+function scheduleTradeLayerPosition() {
+  if (tradeLayerFrame != null) return
+  tradeLayerFrame = window.requestAnimationFrame(() => {
+    tradeLayerFrame = null
+    positionTradeLayerElements()
+  })
+}
+
+function syncTradeLayerPosition() {
+  positionTradeLayerElements()
+  scheduleTradeLayerPosition()
+}
+
+function positionTradeLayerElements() {
+  const layer = document.querySelector('#trade-layer')
+  layer.querySelectorAll('.trade-line[data-price]').forEach(positionTradeLine)
+  layer.querySelectorAll('.protection-zone').forEach(positionProtectionZone)
 }
 
 function positionTradeLine(element) {
@@ -1063,6 +1162,41 @@ function beginDraftDrag(event, role, fromControl = false) {
     document.removeEventListener('pointermove', move)
     document.removeEventListener('pointerup', stop)
     if (!moved) renderTradeLayer()
+  }
+  document.addEventListener('pointermove', move)
+  document.addEventListener('pointerup', stop)
+}
+
+function beginWorkingProtectionDrag(event, element) {
+  if (event.target.closest('button')) return
+  event.preventDefault()
+  const root = document.querySelector('#chart [k-line-chart-id]')
+  let moved = false
+  const move = (moveEvent) => {
+    const point = coreChart.convertFromPixel(
+      { y: moveEvent.clientY - root.getBoundingClientRect().top },
+      { paneId: 'candle_pane', absolute: true },
+    )
+    if (!Number.isFinite(point?.value)) return
+    const parent = state.paper.orders.find(({ id }) => id === Number(element.dataset.protectionParent))
+    const protection = state.paper.orders.find(({ id }) => id === Number(element.dataset.protectionOrder))
+    if (parent) {
+      const field = element.dataset.protectionField
+      parent[field] = constrainProtection(field, point.value, parent)
+    } else if (protection && state.paper.position.quantity) {
+      const field = protection.role === 'take-profit' ? 'takeProfit' : 'stopLoss'
+      const side = state.paper.position.quantity > 0 ? 'buy' : 'sell'
+      protection.price = constrainProtection(field, point.value, { side, price: state.paper.position.averagePrice })
+    } else {
+      return
+    }
+    moved = true
+    renderTradeLayer()
+  }
+  const stop = () => {
+    document.removeEventListener('pointermove', move)
+    document.removeEventListener('pointerup', stop)
+    if (moved) updateReplayView()
   }
   document.addEventListener('pointermove', move)
   document.addEventListener('pointerup', stop)
@@ -1129,8 +1263,20 @@ function formatMoney(value) {
   return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
+function formatProjectedPnl(value) {
+  return `${value >= 0 ? '+' : '−'}${Math.abs(value).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`
+}
+
+function formatPnlPercent(value) {
+  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
 function formatQuantity(value) {
   return value.toLocaleString('en-US', { maximumFractionDigits: 8 })
+}
+
+function formatOrderQuantity(value, symbol) {
+  return `${formatQuantity(value)} ${baseCurrency(symbol.split(':').at(-1))}`
 }
 
 function formatTimestamp(value) {
@@ -1221,6 +1367,12 @@ document.querySelector('#trade-layer').addEventListener('click', (event) => {
     state.orderDraft = null
     return renderTradeLayer()
   }
+  const removeOrderProtection = event.target.closest('[data-remove-order-protection]')
+  if (removeOrderProtection) {
+    const order = state.paper.orders.find(({ id }) => id === Number(removeOrderProtection.dataset.removeOrderProtection))
+    if (order) order[removeOrderProtection.dataset.protectionField] = null
+    return updateReplayView()
+  }
   const cancel = event.target.closest('[data-cancel-order]')
   if (cancel) {
     cancelPaperOrder(state.paper, Number(cancel.dataset.cancelOrder), currentBar().timestamp)
@@ -1237,6 +1389,8 @@ document.querySelector('#trade-layer').addEventListener('change', (event) => {
   renderTradeLayer()
 })
 document.querySelector('#trade-layer').addEventListener('pointerdown', (event) => {
+  const workingProtection = event.target.closest('[data-protection-order], [data-protection-parent]')
+  if (workingProtection) return beginWorkingProtectionDrag(event, workingProtection)
   const protection = event.target.closest('[data-toggle-protection]')
   if (protection) return beginDraftDrag(event, protection.dataset.toggleProtection, true)
   const line = event.target.closest('[data-draft-role]')

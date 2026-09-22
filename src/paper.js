@@ -9,6 +9,7 @@ export function createPaperAccount({ initialBalance = 100_000, feeRate = 0.001, 
     orderHistory: [],
     trades: [],
     nextOrderId: 1,
+    nextGroupId: 1,
   }
 }
 
@@ -29,6 +30,7 @@ export function placePaperOrder(account, input, marketPrice, barIndex, timestamp
 
   const order = {
     id: account.nextOrderId++,
+    groupId: input.groupId ?? (!input.reduceOnly ? account.nextGroupId++ : null),
     symbol: input.symbol,
     side: input.side,
     type,
@@ -92,6 +94,7 @@ export function resetPaperAccount(account, balance = 100_000, timestamp = Date.n
   account.initialBalance = balance
   account.realizedPnl = 0
   account.position = { quantity: 0, averagePrice: 0 }
+  account.nextGroupId = 1
   account.trades.unshift({
     id: `reset-${timestamp}`,
     event: 'balance-reset',
@@ -125,6 +128,28 @@ export function positionProtection(account) {
     takeProfit: orders.find((order) => order.role === 'take-profit')?.price ?? null,
     stopLoss: orders.find((order) => order.role === 'stop-loss')?.price ?? null,
   }
+}
+
+export function projectedPnl(side, quantity, entryPrice, exitPrice) {
+  return Number(quantity) * (Number(exitPrice) - Number(entryPrice)) * (side === 'buy' ? 1 : -1)
+}
+
+export function normalizePaperAccount(account) {
+  const groups = new Map()
+  let next = Number.isInteger(account.nextGroupId) && account.nextGroupId > 0 ? account.nextGroupId : 1
+  const groupKey = (order) => order.parentId == null ? `order:${order.id}` : `order:${order.parentId}`
+  account.orders.forEach((order) => {
+    if (!Number.isInteger(order.groupId) || order.groupId < 1) return
+    groups.set(groupKey(order), order.groupId)
+    next = Math.max(next, order.groupId + 1)
+  })
+  account.orders.forEach((order) => {
+    const key = groupKey(order)
+    if (!groups.has(key)) groups.set(key, next++)
+    order.groupId = groups.get(key)
+  })
+  account.nextGroupId = next
+  return account
 }
 
 function validateOrder(side, type, quantity, price, marketPrice) {
@@ -246,6 +271,7 @@ function createProtectionOrders(account, parent, quantity, barIndex, timestamp) 
     status: 'working',
     createdAt: timestamp,
     activeFrom: barIndex + 1,
+    groupId: parent.groupId,
     takeProfit: null,
     stopLoss: null,
   }

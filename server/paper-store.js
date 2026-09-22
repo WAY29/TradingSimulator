@@ -27,6 +27,7 @@ function isValidState(state) {
   const { paper, session } = state
   if (![paper.initialBalance, paper.realizedPnl, paper.feeRate, paper.slippageRate].every(Number.isFinite)) return false
   if (!Number.isInteger(paper.nextOrderId) || paper.nextOrderId < 1) return false
+  if (!Number.isInteger(paper.nextGroupId) || paper.nextGroupId < 1) return false
   if (!paper.position || ![paper.position.quantity, paper.position.averagePrice].every(Number.isFinite)) return false
   if (!Array.isArray(paper.orders) || !Array.isArray(paper.orderHistory) || !Array.isArray(paper.trades)) return false
   if ([paper.orders, paper.orderHistory, paper.trades].some((items) => items.length > 10_000)) return false

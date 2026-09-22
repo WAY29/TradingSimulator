@@ -5,15 +5,24 @@ import {
   paperSummary,
   placePaperOrder,
   processPaperBar,
+  projectedPnl,
+  normalizePaperAccount,
   resetPaperAccount,
 } from './paper.js'
 
+assert.equal(projectedPnl('buy', 2, 100, 110), 20)
+assert.equal(projectedPnl('buy', 2, 100, 90), -20)
+assert.equal(projectedPnl('sell', 2, 100, 90), 20)
+assert.equal(projectedPnl('sell', 2, 100, 110), -20)
+
 const account = createPaperAccount({ feeRate: 0, slippageRate: 0 })
-placePaperOrder(account, {
+const firstEntry = placePaperOrder(account, {
   symbol: 'BINANCE:BTCUSDT', side: 'buy', type: 'market', quantity: 1, takeProfit: 110, stopLoss: 90,
 }, 100, 0, 1)
 assert.deepEqual(account.position, { quantity: 1, averagePrice: 100 })
 assert.equal(account.orders.length, 2)
+assert.equal(firstEntry.groupId, 1)
+assert.deepEqual(account.orders.map(({ groupId }) => groupId), [1, 1])
 processPaperBar(account, { timestamp: 2, open: 100, high: 111, low: 95 }, 'BINANCE:BTCUSDT', 1)
 assert.equal(account.position.quantity, 0)
 assert.equal(account.realizedPnl, 10)
@@ -22,6 +31,7 @@ assert.equal(account.orders.length, 0)
 const limit = placePaperOrder(account, {
   symbol: 'BINANCE:BTCUSDT', side: 'buy', type: 'limit', quantity: 2, price: 90,
 }, 100, 2, 3)
+assert.equal(limit.groupId, 2)
 processPaperBar(account, { timestamp: 4, open: 100, high: 102, low: 91 }, 'BINANCE:BTCUSDT', 3)
 assert.equal(account.position.quantity, 0)
 processPaperBar(account, { timestamp: 5, open: 92, high: 94, low: 89 }, 'BINANCE:BTCUSDT', 4)
@@ -60,10 +70,22 @@ assert.equal(account.position.quantity, 0)
 assert.equal(account.orders.length, 0)
 assert.equal(account.initialBalance, 100_000)
 assert.equal(account.realizedPnl, 0)
+assert.equal(account.nextGroupId, 1)
 assert.equal(account.trades.length, tradeCount + 1)
 assert.deepEqual(account.trades[0], {
   id: 'reset-10', event: 'balance-reset', balance: 100_000, timestamp: 10,
 })
 assert.equal(account.orderHistory[0].status, 'cancelled')
+
+const legacy = createPaperAccount()
+delete legacy.nextGroupId
+legacy.orders = [
+  { id: 3, parentId: 2 },
+  { id: 4, parentId: 2 },
+  { id: 5, parentId: null },
+]
+normalizePaperAccount(legacy)
+assert.deepEqual(legacy.orders.map(({ groupId }) => groupId), [1, 1, 2])
+assert.equal(legacy.nextGroupId, 3)
 
 console.log('paper trading checks passed')
