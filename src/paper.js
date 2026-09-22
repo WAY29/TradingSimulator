@@ -45,6 +45,7 @@ export function placePaperOrder(account, input, marketPrice, barIndex, timestamp
     status: 'working',
     createdAt: timestamp,
     activeFrom: input.activeFrom ?? barIndex,
+    activeAt: input.activeAt ?? timestamp,
   }
 
   if (type === 'market') {
@@ -61,7 +62,7 @@ export function processPaperBar(account, bar, symbol, barIndex) {
   if (position && Number.isFinite(bar.close)) position.marketPrice = bar.close
   const fills = []
   const working = account.orders
-    .filter((order) => order.symbol === symbol && order.activeFrom <= barIndex)
+    .filter((order) => order.symbol === symbol && order.activeAt <= bar.timestamp)
     .sort((a, b) => Number(b.role === 'stop-loss') - Number(a.role === 'stop-loss'))
 
   for (const order of working) {
@@ -70,6 +71,10 @@ export function processPaperBar(account, bar, symbol, barIndex) {
     if (fillOrder(account, order, fillPrice, barIndex, bar.timestamp)) fills.push(order)
   }
   return fills
+}
+
+export function processPaperBars(account, bars, symbol) {
+  return bars.flatMap((bar, index) => processPaperBar(account, bar, symbol, index))
 }
 
 export function cancelPaperOrder(account, id, timestamp = Date.now()) {
@@ -146,6 +151,18 @@ export function projectedPnl(side, quantity, entryPrice, exitPrice) {
   return Number(quantity) * (Number(exitPrice) - Number(entryPrice)) * (side === 'buy' ? 1 : -1)
 }
 
+export function pagePaperHistory(items, { symbol = '', side = '', page = 1, pageSize = 10 } = {}) {
+  const filtered = items.filter((item) => (!symbol || item.symbol === symbol) && (!side || item.side === side))
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const currentPage = Math.min(Math.max(1, page), pageCount)
+  return {
+    items: filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    page: currentPage,
+    pageCount,
+    total: filtered.length,
+  }
+}
+
 export function normalizePaperAccount(account, fallbackSymbol) {
   account.positions ||= {}
   const legacy = account.position
@@ -174,6 +191,7 @@ export function normalizePaperAccount(account, fallbackSymbol) {
     const key = groupKey(order)
     if (!groups.has(key)) groups.set(key, next++)
     order.groupId = groups.get(key)
+    if (!Number.isFinite(order.activeAt)) order.activeAt = Number.isFinite(order.createdAt) ? order.createdAt : 0
   })
   account.nextGroupId = next
   return account
@@ -309,6 +327,7 @@ function createProtectionOrders(account, parent, quantity, barIndex, timestamp) 
     status: 'working',
     createdAt: timestamp,
     activeFrom: barIndex + 1,
+    activeAt: timestamp,
     groupId: parent.groupId,
     takeProfit: null,
     stopLoss: null,

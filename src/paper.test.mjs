@@ -7,8 +7,10 @@ import {
   paperSummary,
   placePaperOrder,
   processPaperBar,
+  processPaperBars,
   projectedPnl,
   normalizePaperAccount,
+  pagePaperHistory,
   resetPaperAccount,
 } from './paper.js'
 
@@ -92,6 +94,7 @@ legacy.orders = [
 ]
 normalizePaperAccount(legacy)
 assert.deepEqual(legacy.orders.map(({ groupId }) => groupId), [1, 1, 2])
+assert.equal(legacy.orders.every(({ activeAt }) => Number.isFinite(activeAt)), true)
 assert.equal(legacy.nextGroupId, 3)
 assert.equal(paperPosition(legacy, 'BINANCE:BTCUSDT').quantity, 1)
 
@@ -112,5 +115,27 @@ assert.equal(paperPosition(multi, 'BINANCE:ETHUSDT').quantity, 2)
 closePaperPosition(multi, 'BINANCE:BTCUSDT', 102, 2, 4)
 assert.equal(paperPosition(multi, 'BINANCE:BTCUSDT').quantity, 0)
 assert.equal(paperPosition(multi, 'BINANCE:ETHUSDT').quantity, 2)
+
+const offline = createPaperAccount({ feeRate: 0, slippageRate: 0 })
+placePaperOrder(offline, {
+  symbol: 'BINANCE:BTCUSDT', side: 'buy', type: 'market', quantity: 1, stopLoss: 90,
+}, 100, 999, 1)
+const offlineFills = processPaperBars(offline, [
+  { timestamp: 2, open: 92, high: 94, low: 89, close: 90 },
+], 'BINANCE:BTCUSDT')
+assert.equal(offlineFills.length, 1)
+assert.equal(offlineFills[0].role, 'stop-loss')
+assert.equal(paperPosition(offline, 'BINANCE:BTCUSDT').quantity, 0)
+assert.equal(offline.trades[0].price, 90)
+
+const history = Array.from({ length: 12 }, (_, index) => ({
+  id: index + 1,
+  symbol: index % 2 ? 'BINANCE:ETHUSDT' : 'BINANCE:BTCUSDT',
+  side: index % 3 ? 'buy' : 'sell',
+}))
+assert.deepEqual(pagePaperHistory(history, { page: 99 }).items.map(({ id }) => id), [11, 12])
+assert.deepEqual(pagePaperHistory(history, { symbol: 'BINANCE:BTCUSDT', side: 'sell' }), {
+  items: [history[0], history[6]], page: 1, pageCount: 1, total: 2,
+})
 
 console.log('paper trading checks passed')

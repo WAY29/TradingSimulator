@@ -5,11 +5,13 @@ import {
   closePaperPosition,
   createPaperAccount,
   normalizePaperAccount,
+  pagePaperHistory,
   paperSummary,
   paperPosition,
   placePaperOrder,
   positionProtection,
   processPaperBar,
+  processPaperBars,
   projectedPnl,
   resetPaperAccount,
 } from './paper.js'
@@ -18,6 +20,8 @@ import './style.css'
 
 const START_CONTEXT = 40
 const REPLAY_WINDOW = 240
+const HISTORY_PAGE_SIZE = 10
+const PAPER_PANEL_MIN_HEIGHT = 260
 const INITIAL_CASH = 100_000
 const FEE_RATE = 0.001
 const SLIPPAGE_RATE = 0.0005
@@ -64,6 +68,10 @@ const state = {
   speed: 700,
   paper: createPaperAccount({ initialBalance: INITIAL_CASH, feeRate: FEE_RATE, slippageRate: SLIPPAGE_RATE }),
   paperTab: 'positions',
+  historyView: {
+    'order-history': { symbol: '', side: '', page: 1 },
+    'trade-history': { symbol: '', side: '', page: 1 },
+  },
   orderDraft: null,
   contextPrice: null,
   watchlist: loadSavedWatchlist(),
@@ -142,13 +150,14 @@ document.querySelector('#app').innerHTML = `
       <button class="replay-exit" id="exit-replay" title="退出 Bar Replay" aria-label="退出 Bar Replay">×</button>
     </footer>
     <section class="paper-panel" id="paper-panel" hidden>
-      <div class="paper-panel-header"><strong>Paper Trading</strong></div>
+      <div class="paper-resize-handle" id="paper-resize-handle" role="separator" tabindex="0" aria-orientation="horizontal" aria-label="调整模拟交易面板高度" aria-valuemin="260" aria-valuenow="260"></div>
+      <div class="paper-panel-header"><strong>模拟交易</strong></div>
       <div class="paper-account" id="paper-account"></div>
       <nav class="paper-nav" id="paper-tabs">
-        <button class="active" data-paper-tab="positions">Positions <span id="positions-count">0</span></button>
-        <button data-paper-tab="orders">Orders <span id="orders-count">0</span></button>
-        <button data-paper-tab="order-history">Order history</button>
-        <button data-paper-tab="trade-history">Trade history</button>
+        <button class="active" data-paper-tab="positions">持仓 <span id="positions-count">0</span></button>
+        <button data-paper-tab="orders">当前委托 <span id="orders-count">0</span></button>
+        <button data-paper-tab="order-history">委托历史</button>
+        <button data-paper-tab="trade-history">成交历史</button>
       </nav>
       <div class="paper-table" id="paper-table"></div>
     </section>
@@ -295,14 +304,36 @@ function chartSymbol(item) {
   }
 }
 
-async function loadBars(id = state.symbol.id, timeframe = state.timeframe, range = 1000, to) {
+async function loadBars(id = state.symbol.id, timeframe = state.timeframe, range = 1000, to, closed = false) {
   const params = new URLSearchParams({ symbol: id, timeframe, range })
   if (to != null) params.set('to', to)
+  if (closed) params.set('closed', '1')
   const response = await fetch(`/api/tradingview/history?${params}`)
   if (!response.ok) throw new Error(`TradingView HTTP ${response.status}`)
   const { bars } = await response.json()
-  if (to == null && bars.length < START_CONTEXT + 2) throw new Error('Not enough TradingView bars')
+  if (to == null && !closed && bars.length < START_CONTEXT + 2) throw new Error('Not enough TradingView bars')
   return bars
+}
+
+async function catchUpPaperOrders() {
+  const ordersBySymbol = new Map()
+  state.paper.orders.forEach((order) => {
+    const activeAt = Number(order.activeAt)
+    if (!Number.isFinite(activeAt)) return
+    ordersBySymbol.set(order.symbol, Math.min(ordersBySymbol.get(order.symbol) ?? activeAt, activeAt))
+  })
+  for (const [symbol, activeAt] of ordersBySymbol) {
+    const elapsed = Math.max(0, Date.now() - activeAt)
+    // Older gaps use coarser bars; exact intrabar ordering would require persisted minute data.
+    const timeframe = TIMEFRAMES.find(({ duration }) => duration && elapsed <= duration * 900)?.id || 'M'
+    try {
+      const bars = await loadBars(symbol, timeframe, 1000, undefined, true)
+      processPaperBars(state.paper, bars.filter((bar) => bar.timestamp >= activeAt), symbol)
+    } catch (error) {
+      console.error(`Paper order catch-up failed for ${symbol}:`, error)
+      showToast('历史订单补偿失败')
+    }
+  }
 }
 
 async function loadOlderBars() {
@@ -550,39 +581,125 @@ function setPaperPanelOpen(open, { save = true } = {}) {
   if (save) queuePaperStateSave()
 }
 
+function setPaperPanelHeight(height, notify = true) {
+  const terminal = document.querySelector('.terminal')
+  const max = Math.max(PAPER_PANEL_MIN_HEIGHT, terminal.clientHeight - 180)
+  const next = Math.min(max, Math.max(PAPER_PANEL_MIN_HEIGHT, Math.round(height)))
+  terminal.style.setProperty('--paper-panel-height', `${next}px`)
+  const handle = document.querySelector('#paper-resize-handle')
+  handle.setAttribute('aria-valuemax', max)
+  handle.setAttribute('aria-valuenow', next)
+  if (notify) window.dispatchEvent(new Event('resize'))
+}
+
+function beginPaperPanelResize(event) {
+  event.preventDefault()
+  const handle = event.currentTarget
+  handle.setPointerCapture(event.pointerId)
+  document.body.classList.add('resizing-paper-panel')
+  const move = ({ clientY }) => setPaperPanelHeight(document.querySelector('.terminal').getBoundingClientRect().bottom - clientY)
+  const stop = () => {
+    document.body.classList.remove('resizing-paper-panel')
+    handle.removeEventListener('pointermove', move)
+    handle.removeEventListener('pointerup', stop)
+    handle.removeEventListener('pointercancel', stop)
+  }
+  handle.addEventListener('pointermove', move)
+  handle.addEventListener('pointerup', stop)
+  handle.addEventListener('pointercancel', stop)
+}
+
+function resizePaperPanelWithKeyboard(event) {
+  if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return
+  event.preventDefault()
+  const current = Number.parseFloat(getComputedStyle(document.querySelector('.terminal')).getPropertyValue('--paper-panel-height'))
+  setPaperPanelHeight(current + (event.key === 'ArrowUp' ? 20 : -20))
+}
+
 function renderPaperPanel() {
   const price = currentBar().close
   const summary = paperSummary(state.paper, price, state.symbol.id)
   document.querySelector('#paper-account').innerHTML = [
-    ['Account balance', summary.balance],
-    ['Equity', summary.equity],
-    ['Realized PnL', summary.realizedPnl],
-    ['Unrealized PnL', summary.unrealizedPnl],
-    ['Available funds', summary.availableFunds],
-    ['Orders margin', summary.ordersMargin],
+    ['账户余额', summary.balance],
+    ['账户净值', summary.equity],
+    ['已实现盈亏', summary.realizedPnl],
+    ['未实现盈亏', summary.unrealizedPnl],
+    ['可用资金', summary.availableFunds],
+    ['委托占用', summary.ordersMargin],
   ].map(([label, value], index) => `
-    <span><small>${label}${index === 0 ? '<button class="balance-reset" data-reset-balance title="重置模拟账户" aria-label="重置模拟账户">↻</button>' : ''}</small><strong class="${label.includes('PnL') ? signClass(value) : ''}">${formatMoney(value)}</strong></span>
+    <span><small>${label}${index === 0 ? '<button class="balance-reset" data-reset-balance title="重置模拟账户" aria-label="重置模拟账户">↻</button>' : ''}</small><strong class="${label.includes('盈亏') ? signClass(value) : ''}">${formatMoney(value)}</strong></span>
   `).join('')
   document.querySelector('#positions-count').textContent = Object.values(state.paper.positions).filter(({ quantity }) => quantity).length
   document.querySelector('#orders-count').textContent = state.paper.orders.length
   document.querySelectorAll('#paper-tabs button').forEach((button) => {
     button.classList.toggle('active', button.dataset.paperTab === state.paperTab)
   })
-  document.querySelector('#paper-table').innerHTML = paperTable(state.paperTab, price)
+  const table = document.querySelector('#paper-table')
+  table.classList.toggle('history', state.paperTab.endsWith('history'))
+  table.innerHTML = paperTable(state.paperTab, price)
 }
 
 function paperTable(tab, price) {
   if (tab === 'positions') return positionsTable(price)
   if (tab === 'orders') return ordersTable(state.paper.orders, true)
-  if (tab === 'order-history') return ordersTable(state.paper.orderHistory, false)
-  return tradesTable(state.paper.trades)
+  return historyTable(tab, tab === 'order-history' ? state.paper.orderHistory : state.paper.trades)
+}
+
+function historyTable(tab, items) {
+  const view = state.historyView[tab]
+  const symbols = [...new Set(items.map(({ symbol }) => symbol).filter(Boolean))].sort()
+  const result = pagePaperHistory(items, { ...view, pageSize: HISTORY_PAGE_SIZE })
+  view.page = result.page
+  const emptyLabel = items.length ? '没有符合条件的记录' : tab === 'order-history' ? '暂无委托历史' : '暂无成交记录'
+  const rows = tab === 'order-history'
+    ? ordersTable(result.items, false, symbols, emptyLabel)
+    : tradesTable(result.items, symbols, emptyLabel)
+  return `
+    <div class="history-content">${rows}</div>
+    ${result.pageCount > 1 ? `<div class="history-pagination">
+      <button data-history-page="-1" title="上一页" aria-label="上一页" ${result.page === 1 ? 'disabled' : ''}>‹</button>
+      <span>${result.page} / ${result.pageCount}</span>
+      <button data-history-page="1" title="下一页" aria-label="下一页" ${result.page === result.pageCount ? 'disabled' : ''}>›</button>
+    </div>` : ''}`
+}
+
+function historyFilterHeader(label, field, symbols) {
+  const view = state.historyView[state.paperTab]
+  const options = field === 'symbol'
+    ? symbols.map((symbol) => [symbol, symbol])
+    : [['buy', '买入'], ['sell', '卖出']]
+  return `<span class="history-column-label">${label}
+    <details class="history-filter ${view[field] ? 'active' : ''}">
+      <summary title="筛选${label}" aria-label="筛选${label}">⌕</summary>
+      <div class="history-filter-menu" data-history-filter-menu="${field}">
+        <button class="${view[field] ? '' : 'active'}" data-history-filter-value="">全部${label}</button>
+        ${options.map(([value, text]) => `<button class="${view[field] === value ? 'active' : ''}" data-history-filter-value="${value}">${text}</button>`).join('')}
+      </div>
+    </details>
+  </span>`
+}
+
+function positionHistoryFilter(details) {
+  if (!details.open) return
+  document.querySelectorAll('.history-filter[open]').forEach((item) => {
+    if (item !== details) item.removeAttribute('open')
+  })
+  const summary = details.querySelector('summary')
+  const menu = details.querySelector('.history-filter-menu')
+  const rect = summary.getBoundingClientRect()
+  const roomBelow = window.innerHeight - rect.bottom - 8
+  const roomAbove = rect.top - 8
+  const opensBelow = roomBelow >= 120 || roomBelow >= roomAbove
+  menu.style.maxHeight = `${Math.max(80, Math.min(210, opensBelow ? roomBelow : roomAbove))}px`
+  menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - menu.offsetWidth - 8))}px`
+  menu.style.top = `${opensBelow ? rect.bottom + 4 : Math.max(8, rect.top - menu.offsetHeight - 4)}px`
 }
 
 function positionsTable(price) {
   const positions = Object.values(state.paper.positions).filter(({ quantity }) => quantity)
-  if (!positions.length) return paperEmpty('No positions')
+  if (!positions.length) return paperEmpty('暂无持仓')
   return `
-    <div class="paper-grid position-grid paper-grid-head"><span>Symbol</span><span>Side</span><span>Quantity</span><span>Avg fill price</span><span>Take profit</span><span>Stop loss</span><span>Last price</span><span>Unrealized PnL</span><span>Unrealized PnL %</span><span></span></div>
+    <div class="paper-grid position-grid paper-grid-head"><span>标的</span><span>方向</span><span>数量</span><span>平均成交价</span><span>止盈</span><span>止损</span><span>最新价</span><span>未实现盈亏</span><span>盈亏比例</span><span></span></div>
     ${positions.map((position) => {
       const symbol = position.symbol
       const positionPrice = symbol === state.symbol.id ? price : position.marketPrice
@@ -591,7 +708,7 @@ function positionsTable(price) {
       const pnlPercent = pnl / Math.abs(position.quantity * position.averagePrice) * 100
       const opening = positionOpeningTrade(symbol)
       return `<div class="paper-grid position-grid paper-row" ${paperJumpAttributes(symbol, opening?.barTimestamp ?? opening?.timestamp ?? opening?.filledAt ?? opening?.createdAt)}>
-        <strong>${symbol}</strong><span class="${position.quantity > 0 ? 'positive' : 'negative'}">${position.quantity > 0 ? 'Long' : 'Short'}</span>
+        <strong>${symbol}</strong><span class="${position.quantity > 0 ? 'positive' : 'negative'}">${position.quantity > 0 ? '多' : '空'}</span>
         <span>${formatOrderQuantity(Math.abs(position.quantity), symbol.split(':').at(-1))}</span><span>${formatPrice(position.averagePrice)}</span>
         <span>${protection.takeProfit == null ? '—' : formatPrice(protection.takeProfit)}</span><span>${protection.stopLoss == null ? '—' : formatPrice(protection.stopLoss)}</span>
         <span>${formatPrice(positionPrice)}</span><span class="${signClass(pnl)}">${formatMoney(pnl)}</span><span class="${signClass(pnlPercent)}">${formatPnlPercent(pnlPercent)}</span>
@@ -600,26 +717,26 @@ function positionsTable(price) {
     }).join('')}`
 }
 
-function ordersTable(orders, cancellable) {
-  if (!orders.length) return paperEmpty(cancellable ? 'No working orders' : 'No order history')
-  return `
-    <div class="paper-grid order-grid paper-grid-head"><span>Symbol</span><span>Side</span><span>Type</span><span>Quantity</span><span>Limit / Stop price</span><span>Fill price</span><span>Take profit</span><span>Stop loss</span><span>Status</span><span>Placing time</span><span></span></div>
+function ordersTable(orders, cancellable, historySymbols = null, emptyLabel) {
+  const head = `<div class="paper-grid order-grid paper-grid-head">${historySymbols ? historyFilterHeader('标的', 'symbol', historySymbols) : '<span>标的</span>'}${historySymbols ? historyFilterHeader('方向', 'side', historySymbols) : '<span>方向</span>'}<span>类型</span><span>数量</span><span>限价 / 止损价</span><span>成交价</span><span>止盈</span><span>止损</span><span>状态</span><span>下单时间</span><span></span></div>`
+  if (!orders.length) return historySymbols ? `${head}${paperEmpty(emptyLabel)}` : paperEmpty(cancellable ? '暂无当前委托' : '暂无委托历史')
+  return `${head}
     ${orders.map((order) => `
       <div class="paper-grid order-grid paper-row" ${paperJumpAttributes(order.symbol, order.filledAt ?? order.createdAt)}>
-        <strong>${order.symbol}</strong><span class="${order.side === 'buy' ? 'positive' : 'negative'}">${order.side === 'buy' ? 'Buy' : 'Sell'}</span>
+        <strong>${order.symbol}</strong><span class="${order.side === 'buy' ? 'positive' : 'negative'}">${order.side === 'buy' ? '买入' : '卖出'}</span>
         <span>${orderTypeLabel(order)}</span><span>${formatOrderQuantity(order.quantity, order.symbol)}</span><span>${formatPrice(order.price)}</span>
-        <span>${order.fillPrice == null ? '—' : formatPrice(order.fillPrice)}</span><span>${order.takeProfit == null ? '—' : formatPrice(order.takeProfit)}</span><span>${order.stopLoss == null ? '—' : formatPrice(order.stopLoss)}</span><span class="order-status ${order.status}">${order.status}</span>
+        <span>${order.fillPrice == null ? '—' : formatPrice(order.fillPrice)}</span><span>${order.takeProfit == null ? '—' : formatPrice(order.takeProfit)}</span><span>${order.stopLoss == null ? '—' : formatPrice(order.stopLoss)}</span><span class="order-status ${order.status}">${orderStatusLabel(order.status)}</span>
         <span>${formatTimestamp(order.createdAt)}</span>${cancellable ? `<button class="table-action" data-cancel-order="${order.id}" title="取消订单" aria-label="取消订单">×</button>` : '<span></span>'}
       </div>`).join('')}`
 }
 
-function tradesTable(trades) {
-  if (!trades.length) return paperEmpty('No trades')
-  return `
-    <div class="paper-grid trade-grid paper-grid-head"><span>Symbol</span><span>Side</span><span>Type</span><span>Quantity</span><span>Fill price</span><span>Fee</span><span>Realized PnL</span><span>Time</span></div>
+function tradesTable(trades, historySymbols = null, emptyLabel) {
+  const head = `<div class="paper-grid trade-grid paper-grid-head">${historySymbols ? historyFilterHeader('标的', 'symbol', historySymbols) : '<span>标的</span>'}${historySymbols ? historyFilterHeader('方向', 'side', historySymbols) : '<span>方向</span>'}<span>类型</span><span>数量</span><span>成交价</span><span>手续费</span><span>已实现盈亏</span><span>时间</span></div>`
+  if (!trades.length) return historySymbols ? `${head}${paperEmpty(emptyLabel)}` : paperEmpty('暂无成交记录')
+  return `${head}
     ${trades.map((trade) => trade.event === 'balance-reset' ? `
-      <div class="paper-grid trade-grid trade-reset"><strong>Paper Trading</strong><span>Reset Balance</span><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span><span>${formatTimestamp(trade.timestamp)}</span></div>` : `
-      <div class="paper-grid trade-grid paper-row" ${paperJumpAttributes(trade.symbol, trade.barTimestamp ?? trade.timestamp)}><strong>${trade.symbol}</strong><span class="${trade.side === 'buy' ? 'positive' : 'negative'}">${trade.side === 'buy' ? 'Buy' : 'Sell'}</span>
+      <div class="paper-grid trade-grid trade-reset"><strong>模拟交易</strong><span>重置余额</span><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span><span>${formatTimestamp(trade.timestamp)}</span></div>` : `
+      <div class="paper-grid trade-grid paper-row" ${paperJumpAttributes(trade.symbol, trade.barTimestamp ?? trade.timestamp)}><strong>${trade.symbol}</strong><span class="${trade.side === 'buy' ? 'positive' : 'negative'}">${trade.side === 'buy' ? '买入' : '卖出'}</span>
         <span>${orderTypeLabel(trade)}</span><span>${formatOrderQuantity(trade.quantity, trade.symbol)}</span><span>${formatPrice(trade.price)}</span>
         <span>${formatMoney(trade.fee)}</span><span class="${signClass(trade.realizedPnl)}">${formatMoney(trade.realizedPnl)}</span><span>${formatTimestamp(trade.timestamp)}</span></div>
     `).join('')}`
@@ -641,9 +758,13 @@ function paperJumpAttributes(symbol, timestamp) {
 }
 
 function orderTypeLabel(order) {
-  if (order.role === 'take-profit') return 'Take Profit'
-  if (order.role === 'stop-loss') return 'Stop Loss'
-  return ({ market: 'Market', limit: 'Limit', stop: 'Stop' })[order.type] || order.type
+  if (order.role === 'take-profit') return '止盈'
+  if (order.role === 'stop-loss') return '止损'
+  return ({ market: '市价', limit: '限价', stop: '止损' })[order.type] || order.type
+}
+
+function orderStatusLabel(status) {
+  return ({ working: '挂单中', filled: '已成交', cancelled: '已取消' })[status] || status
 }
 
 function renderIdentity() {
@@ -696,7 +817,10 @@ function applyQuote(quote) {
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
   }).format(quote.timestamp)
 
-  if (quote.id !== state.symbol.id) return
+  if (quote.id !== state.symbol.id) {
+    processLivePaperQuote(quote)
+    return
+  }
   state.currentQuote = quote
   const direction = previousPrice == null ? quote.direction : Math.sign(quote.price - previousPrice) || quote.direction
   if (previousPrice == null || quote.price !== previousPrice) {
@@ -720,15 +844,18 @@ function applyQuote(quote) {
     bar.high = Math.max(bar.high, quote.price)
     bar.low = Math.min(bar.low, quote.price)
   }
-  if (state.mode === 'live') {
-    const tick = { timestamp: bar.timestamp, open: quote.price, high: quote.price, low: quote.price, close: quote.price, volume: 0 }
-    const fills = processPaperBar(state.paper, tick, state.symbol.id, state.liveHead)
-    if (fills.length) queuePaperStateSave()
-    if (state.paperPanelOpen) renderPaperPanel()
-    window.requestAnimationFrame(renderTradeLayer)
-  }
+  processLivePaperQuote(quote)
   if (state.mode !== 'replay') liveSubscriber?.({ ...bar })
   updateMarketDetails()
+}
+
+function processLivePaperQuote(quote) {
+  if (state.mode !== 'live' || (!state.paper.positions[quote.id] && !state.paper.orders.some(({ symbol }) => symbol === quote.id))) return
+  const tick = { timestamp: quote.timestamp, open: quote.price, high: quote.price, low: quote.price, close: quote.price, volume: 0 }
+  const fills = processPaperBar(state.paper, tick, quote.id, state.liveHead)
+  if (fills.length) queuePaperStateSave()
+  if (state.paperPanelOpen) renderPaperPanel()
+  if (quote.id === state.symbol.id) window.requestAnimationFrame(renderTradeLayer)
 }
 
 function updateWatchlistRow(item, previousPrice) {
@@ -774,8 +901,10 @@ function flashRow(row, direction) {
 
 function connectQuoteStream() {
   state.eventSource?.close()
-  const symbols = new Set(state.watchlist.map(({ id }) => id))
+  const symbols = new Set(state.paper.orders.map(({ symbol }) => symbol))
+  Object.keys(state.paper.positions).forEach((symbol) => symbols.add(symbol))
   symbols.add(state.symbol.id)
+  state.watchlist.forEach(({ id }) => symbols.add(id))
   state.eventSource = new EventSource(`/api/tradingview/stream?symbols=${encodeURIComponent([...symbols].join(','))}`)
   state.eventSource.onmessage = (event) => applyQuote(JSON.parse(event.data))
   state.eventSource.onerror = () => { document.querySelector('#watchlist-status').textContent = '重连中' }
@@ -1083,7 +1212,8 @@ function submitOrderDraft() {
   const draft = state.orderDraft
   if (!draft) return
   try {
-    placePaperOrder(state.paper, { ...draft, symbol: state.symbol.id }, currentBar().close, currentBarIndex(), currentBar().timestamp)
+    const timestamp = state.mode === 'replay' ? currentBar().timestamp : state.currentQuote?.timestamp ?? Date.now()
+    placePaperOrder(state.paper, { ...draft, symbol: state.symbol.id }, currentBar().close, currentBarIndex(), timestamp)
     state.orderDraft = null
     updateReplayView()
   } catch (error) {
@@ -1470,6 +1600,8 @@ document.querySelector('#paper-tabs').addEventListener('click', (event) => {
   renderPaperPanel()
   queuePaperStateSave()
 })
+document.querySelector('#paper-resize-handle').addEventListener('pointerdown', beginPaperPanelResize)
+document.querySelector('#paper-resize-handle').addEventListener('keydown', resizePaperPanelWithKeyboard)
 document.querySelector('#paper-account').addEventListener('click', (event) => {
   if (!event.target.closest('[data-reset-balance]')) return
   if (!window.confirm('重置模拟账户至 $100,000？\n\n所有持仓和挂单将被清空，历史记录会保留。')) return
@@ -1480,6 +1612,26 @@ document.querySelector('#paper-account').addEventListener('click', (event) => {
   updateReplayView()
 })
 document.querySelector('#paper-table').addEventListener('click', async (event) => {
+  const summary = event.target.closest('.history-filter summary')
+  if (summary) {
+    window.requestAnimationFrame(() => positionHistoryFilter(summary.parentElement))
+    return
+  }
+  const filter = event.target.closest('[data-history-filter-value]')
+  if (filter) {
+    const field = filter.closest('[data-history-filter-menu]').dataset.historyFilterMenu
+    const view = state.historyView[state.paperTab]
+    view[field] = filter.dataset.historyFilterValue
+    view.page = 1
+    renderPaperPanel()
+    return
+  }
+  const page = event.target.closest('[data-history-page]')
+  if (page) {
+    state.historyView[state.paperTab].page += Number(page.dataset.historyPage)
+    renderPaperPanel()
+    return
+  }
   const cancel = event.target.closest('[data-cancel-order]')
   if (cancel) {
     cancelPaperOrder(state.paper, Number(cancel.dataset.cancelOrder), currentBar().timestamp)
@@ -1500,6 +1652,11 @@ document.querySelector('#paper-table').addEventListener('click', async (event) =
     await jumpToPaperEvent(jump.dataset.paperJumpSymbol, Number(jump.dataset.paperJumpTimestamp))
     return
   }
+})
+document.addEventListener('click', (event) => {
+  document.querySelectorAll('.history-filter[open]').forEach((details) => {
+    if (!details.contains(event.target)) details.removeAttribute('open')
+  })
 })
 document.querySelector('#chart-context-menu').addEventListener('click', async (event) => {
   const action = event.target.closest('button[data-context]')
@@ -1636,7 +1793,12 @@ document.addEventListener('click', (event) => {
   if (!event.target.closest('.timeframe-control')) document.querySelector('#timeframe-menu').hidden = true
   if (!event.target.closest('#chart-context-menu')) closeChartContextMenu()
 })
-window.addEventListener('resize', () => window.requestAnimationFrame(renderTradeLayer))
+window.addEventListener('resize', () => {
+  const terminal = document.querySelector('.terminal')
+  setPaperPanelHeight(Number.parseFloat(getComputedStyle(terminal).getPropertyValue('--paper-panel-height')), false)
+  document.querySelectorAll('.history-filter[open]').forEach(positionHistoryFilter)
+  window.requestAnimationFrame(renderTradeLayer)
+})
 window.addEventListener('pagehide', () => persistPaperState({ keepalive: true }))
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return
@@ -1656,6 +1818,7 @@ async function start() {
     }
     setupReplay(await loadBars())
     restoreReplaySession()
+    if (state.mode === 'live') await catchUpPaperOrders()
     renderTimeframes()
     renderIdentity()
     renderWatchlist()
