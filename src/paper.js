@@ -241,17 +241,24 @@ function fillOrder(account, order, price, barIndex, timestamp) {
   order.filledAt = timestamp
   order.fee = fee
   order.realizedPnl = fill.realizedPnl - fee
+  order.openedQuantity = fill.openedQuantity
+  order.closedQuantity = quantity - fill.openedQuantity
   finishOrder(account, order, 'filled', timestamp)
   account.trades.unshift({
     id: order.id,
     symbol: order.symbol,
     side: order.side,
     type: order.type,
+    role: order.role,
+    reduceOnly: order.reduceOnly,
     quantity,
     price,
     fee,
     realizedPnl: order.realizedPnl,
+    openedQuantity: fill.openedQuantity,
+    closedQuantity: quantity - fill.openedQuantity,
     timestamp,
+    barTimestamp: timestamp,
   })
 
   if (order.ocoGroup) {

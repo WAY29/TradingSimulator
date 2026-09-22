@@ -73,6 +73,7 @@ const state = {
   searchFilter: '',
   searchResults: [],
   selectionTimestamp: null,
+  focusTimestamp: null,
   restoredSession: null,
   paperPanelOpen: false,
 }
@@ -242,10 +243,19 @@ const replayDatafeed = {
   async getHistoryKLineData(_symbol, _period, from, to) {
     const inReplay = state.mode === 'replay'
     const end = inReplay ? state.replayHead : state.liveHead
-    const start = inReplay ? state.replayStart : Math.max(0, end - REPLAY_WINDOW + 1)
+    const focusIndex = !inReplay && state.focusTimestamp != null
+      ? state.bars.findIndex(({ timestamp }) => timestamp === state.focusTimestamp)
+      : -1
+    const focused = focusIndex >= 0
+    const start = inReplay
+      ? state.replayStart
+      : focused ? Math.max(0, focusIndex - Math.floor(REPLAY_WINDOW / 2)) : Math.max(0, end - REPLAY_WINDOW + 1)
+    const visibleEnd = inReplay
+      ? end
+      : focused ? Math.min(state.bars.length - 1, focusIndex + Math.floor(REPLAY_WINDOW / 2)) : end
     const firstVisible = state.bars[start]
     if (!firstVisible || to < firstVisible.timestamp) return []
-    return state.bars.slice(start, end + 1).filter((bar) => bar.timestamp >= from && bar.timestamp <= to)
+    return state.bars.slice(start, visibleEnd + 1).filter((bar) => bar.timestamp >= from && bar.timestamp <= to)
   },
   subscribe(_symbol, _period, callback) {
     liveSubscriber = callback
@@ -295,6 +305,20 @@ function setupReplay(bars) {
   state.replayEnd = bars.findLastIndex((bar) => nextBarTimestamp(bar.timestamp) <= Date.now())
   state.replayStart = Math.max(0, state.replayEnd - REPLAY_WINDOW + 1)
   state.replayHead = state.liveHead
+}
+
+function chartWindowData() {
+  const end = state.mode === 'replay' ? state.replayHead : state.liveHead
+  const focusIndex = state.mode !== 'replay' && state.focusTimestamp != null
+    ? state.bars.findIndex(({ timestamp }) => timestamp === state.focusTimestamp)
+    : -1
+  const start = focusIndex >= 0
+    ? Math.max(0, focusIndex - Math.floor(REPLAY_WINDOW / 2))
+    : state.mode === 'replay' ? state.replayStart : Math.max(0, end - REPLAY_WINDOW + 1)
+  const visibleEnd = focusIndex >= 0
+    ? Math.min(state.bars.length - 1, focusIndex + Math.floor(REPLAY_WINDOW / 2))
+    : end
+  return state.bars.slice(start, visibleEnd + 1)
 }
 
 function renderChart() {
@@ -510,7 +534,7 @@ function renderPaperPanel() {
   ].map(([label, value], index) => `
     <span><small>${label}${index === 0 ? '<button class="balance-reset" data-reset-balance title="重置模拟账户" aria-label="重置模拟账户">↻</button>' : ''}</small><strong class="${label.includes('PnL') ? signClass(value) : ''}">${formatMoney(value)}</strong></span>
   `).join('')
-  document.querySelector('#positions-count').textContent = paperPosition(state.paper, state.symbol.id).quantity ? '1' : '0'
+  document.querySelector('#positions-count').textContent = Object.values(state.paper.positions).filter(({ quantity }) => quantity).length
   document.querySelector('#orders-count').textContent = state.paper.orders.length
   document.querySelectorAll('#paper-tabs button').forEach((button) => {
     button.classList.toggle('active', button.dataset.paperTab === state.paperTab)
@@ -526,20 +550,25 @@ function paperTable(tab, price) {
 }
 
 function positionsTable(price) {
-  const position = paperPosition(state.paper, state.symbol.id)
-  if (!position.quantity) return paperEmpty('No positions')
-  const protection = positionProtection(state.paper, state.symbol.id)
-  const pnl = position.quantity * (price - position.averagePrice)
-  const pnlPercent = pnl / Math.abs(position.quantity * position.averagePrice) * 100
+  const positions = Object.values(state.paper.positions).filter(({ quantity }) => quantity)
+  if (!positions.length) return paperEmpty('No positions')
   return `
     <div class="paper-grid position-grid paper-grid-head"><span>Symbol</span><span>Side</span><span>Quantity</span><span>Avg fill price</span><span>Take profit</span><span>Stop loss</span><span>Last price</span><span>Unrealized PnL</span><span>Unrealized PnL %</span><span></span></div>
-    <div class="paper-grid position-grid">
-      <strong>${state.symbol.id}</strong><span class="${position.quantity > 0 ? 'positive' : 'negative'}">${position.quantity > 0 ? 'Long' : 'Short'}</span>
-      <span>${formatOrderQuantity(Math.abs(position.quantity), state.symbol.symbol)}</span><span>${formatPrice(position.averagePrice)}</span>
-      <span>${protection.takeProfit == null ? '—' : formatPrice(protection.takeProfit)}</span><span>${protection.stopLoss == null ? '—' : formatPrice(protection.stopLoss)}</span>
-      <span>${formatPrice(price)}</span><span class="${signClass(pnl)}">${formatMoney(pnl)}</span><span class="${signClass(pnlPercent)}">${formatPnlPercent(pnlPercent)}</span>
-      <button class="table-action" data-close-position title="平仓" aria-label="平仓">×</button>
-    </div>`
+    ${positions.map((position) => {
+      const symbol = position.symbol
+      const positionPrice = symbol === state.symbol.id ? price : position.marketPrice
+      const protection = positionProtection(state.paper, symbol)
+      const pnl = position.quantity * (positionPrice - position.averagePrice)
+      const pnlPercent = pnl / Math.abs(position.quantity * position.averagePrice) * 100
+      const opening = positionOpeningTrade(symbol)
+      return `<div class="paper-grid position-grid paper-row" ${paperJumpAttributes(symbol, opening?.barTimestamp ?? opening?.timestamp ?? opening?.filledAt ?? opening?.createdAt)}>
+        <strong>${symbol}</strong><span class="${position.quantity > 0 ? 'positive' : 'negative'}">${position.quantity > 0 ? 'Long' : 'Short'}</span>
+        <span>${formatOrderQuantity(Math.abs(position.quantity), symbol.split(':').at(-1))}</span><span>${formatPrice(position.averagePrice)}</span>
+        <span>${protection.takeProfit == null ? '—' : formatPrice(protection.takeProfit)}</span><span>${protection.stopLoss == null ? '—' : formatPrice(protection.stopLoss)}</span>
+        <span>${formatPrice(positionPrice)}</span><span class="${signClass(pnl)}">${formatMoney(pnl)}</span><span class="${signClass(pnlPercent)}">${formatPnlPercent(pnlPercent)}</span>
+        <button class="table-action" data-close-position-symbol="${symbol}" title="平仓" aria-label="平仓">×</button>
+      </div>`
+    }).join('')}`
 }
 
 function ordersTable(orders, cancellable) {
@@ -547,7 +576,7 @@ function ordersTable(orders, cancellable) {
   return `
     <div class="paper-grid order-grid paper-grid-head"><span>Symbol</span><span>Side</span><span>Type</span><span>Quantity</span><span>Limit / Stop price</span><span>Fill price</span><span>Take profit</span><span>Stop loss</span><span>Status</span><span>Placing time</span><span></span></div>
     ${orders.map((order) => `
-      <div class="paper-grid order-grid">
+      <div class="paper-grid order-grid paper-row" ${paperJumpAttributes(order.symbol, order.filledAt ?? order.createdAt)}>
         <strong>${order.symbol}</strong><span class="${order.side === 'buy' ? 'positive' : 'negative'}">${order.side === 'buy' ? 'Buy' : 'Sell'}</span>
         <span>${orderTypeLabel(order)}</span><span>${formatOrderQuantity(order.quantity, order.symbol)}</span><span>${formatPrice(order.price)}</span>
         <span>${order.fillPrice == null ? '—' : formatPrice(order.fillPrice)}</span><span>${order.takeProfit == null ? '—' : formatPrice(order.takeProfit)}</span><span>${order.stopLoss == null ? '—' : formatPrice(order.stopLoss)}</span><span class="order-status ${order.status}">${order.status}</span>
@@ -561,7 +590,7 @@ function tradesTable(trades) {
     <div class="paper-grid trade-grid paper-grid-head"><span>Symbol</span><span>Side</span><span>Type</span><span>Quantity</span><span>Fill price</span><span>Fee</span><span>Realized PnL</span><span>Time</span></div>
     ${trades.map((trade) => trade.event === 'balance-reset' ? `
       <div class="paper-grid trade-grid trade-reset"><strong>Paper Trading</strong><span>Reset Balance</span><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span><span>${formatTimestamp(trade.timestamp)}</span></div>` : `
-      <div class="paper-grid trade-grid"><strong>${trade.symbol}</strong><span class="${trade.side === 'buy' ? 'positive' : 'negative'}">${trade.side === 'buy' ? 'Buy' : 'Sell'}</span>
+      <div class="paper-grid trade-grid paper-row" ${paperJumpAttributes(trade.symbol, trade.barTimestamp ?? trade.timestamp)}><strong>${trade.symbol}</strong><span class="${trade.side === 'buy' ? 'positive' : 'negative'}">${trade.side === 'buy' ? 'Buy' : 'Sell'}</span>
         <span>${orderTypeLabel(trade)}</span><span>${formatOrderQuantity(trade.quantity, trade.symbol)}</span><span>${formatPrice(trade.price)}</span>
         <span>${formatMoney(trade.fee)}</span><span class="${signClass(trade.realizedPnl)}">${formatMoney(trade.realizedPnl)}</span><span>${formatTimestamp(trade.timestamp)}</span></div>
     `).join('')}`
@@ -569,6 +598,17 @@ function tradesTable(trades) {
 
 function paperEmpty(label) {
   return `<div class="paper-empty">${label}</div>`
+}
+
+function positionOpeningTrade(symbol) {
+  return state.paper.trades.find((trade) => trade.symbol === symbol && trade.openedQuantity > 0)
+}
+
+function paperJumpAttributes(symbol, timestamp) {
+  if (!symbol) return ''
+  const value = Number(timestamp)
+  const time = Number.isFinite(value) ? ` data-paper-jump-timestamp="${value}"` : ''
+  return `data-paper-jump-symbol="${symbol}"${time} role="button" tabindex="0"`
 }
 
 function orderTypeLabel(order) {
@@ -652,7 +692,7 @@ function applyQuote(quote) {
     bar.low = Math.min(bar.low, quote.price)
   }
   if (state.mode === 'live') {
-    const tick = { timestamp: quote.timestamp, open: quote.price, high: quote.price, low: quote.price, close: quote.price, volume: 0 }
+    const tick = { timestamp: bar.timestamp, open: quote.price, high: quote.price, low: quote.price, close: quote.price, volume: 0 }
     const fills = processPaperBar(state.paper, tick, state.symbol.id, state.liveHead)
     if (fills.length) queuePaperStateSave()
     if (state.paperPanelOpen) renderPaperPanel()
@@ -712,12 +752,17 @@ function connectQuoteStream() {
   state.eventSource.onerror = () => { document.querySelector('#watchlist-status').textContent = '重连中' }
 }
 
-async function switchSymbol(item) {
-  if (item.id === state.symbol.id) return closeSymbolSearch()
+async function switchSymbol(item, jumpTimestamp = null) {
+  if (item.id === state.symbol.id) {
+    closeSymbolSearch()
+    if (Number.isFinite(jumpTimestamp)) jumpToChartTimestamp(jumpTimestamp)
+    return
+  }
   showLoading(true)
   exitReplay()
   try {
     state.symbol = { ...item }
+    state.focusTimestamp = Number.isFinite(jumpTimestamp) ? jumpTimestamp : null
     state.currentQuote = null
     setupReplay(await loadBars(item.id))
     saveChartPreferences()
@@ -725,8 +770,11 @@ async function switchSymbol(item) {
     renderWatchlist()
     coreChart.clearData()
     chart.setSymbol(chartSymbol(state.symbol))
-    coreChart.applyNewData(state.bars.slice(Math.max(0, state.liveHead - REPLAY_WINDOW + 1), state.liveHead + 1), true)
-    window.requestAnimationFrame(() => coreChart.scrollToRealTime())
+    coreChart.applyNewData(chartWindowData(), true)
+    window.requestAnimationFrame(() => {
+      if (Number.isFinite(jumpTimestamp)) jumpToChartTimestamp(jumpTimestamp)
+      else coreChart.scrollToRealTime()
+    })
     setPaperPanelOpen(state.paperPanelOpen, { save: false })
     updateReplayView()
     connectQuoteStream()
@@ -749,6 +797,7 @@ async function switchTimeframe(timeframe) {
   try {
     const bars = await loadBars(state.symbol.id, timeframe)
     state.timeframe = timeframe
+    state.focusTimestamp = null
     setupReplay(bars)
     saveChartPreferences()
     renderTimeframes()
@@ -762,6 +811,35 @@ async function switchTimeframe(timeframe) {
   } finally {
     showLoading(false)
   }
+}
+
+function paperSymbol(symbol) {
+  if (state.symbol.id === symbol) return state.symbol
+  return state.watchlist.find((item) => item.id === symbol) || {
+    id: symbol,
+    exchange: symbol.split(':')[0],
+    symbol: symbol.split(':').at(-1),
+    description: symbol.split(':').at(-1),
+    type: 'spot',
+  }
+}
+
+function jumpToPaperEvent(symbol, timestamp) {
+  const item = paperSymbol(symbol)
+  if (!item) return
+  return switchSymbol(item, Number.isFinite(timestamp) ? timestamp : null)
+}
+
+function jumpToChartTimestamp(timestamp) {
+  const target = state.bars.find(({ timestamp: value }) => value === timestamp)
+    || state.bars.reduce((closest, bar) => Math.abs(bar.timestamp - timestamp) < Math.abs(closest.timestamp - timestamp) ? bar : closest, state.bars[0])
+  if (!target || !coreChart) return
+  state.focusTimestamp = target.timestamp
+  coreChart.applyNewData(chartWindowData(), true)
+  window.requestAnimationFrame(() => {
+    coreChart.scrollToTimestamp(target.timestamp, 300)
+    renderTradeLayer()
+  })
 }
 
 function addToWatchlist(item) {
@@ -992,7 +1070,7 @@ function renderTradeLayer() {
   }
   const position = paperPosition(state.paper, state.symbol.id)
   const price = currentBar().close
-  const html = []
+  const html = [tradeMarkerLines()]
   if (position.quantity) {
     const pnl = position.quantity * (price - position.averagePrice)
     const groups = [...new Set(state.paper.orders.filter(({ symbol, reduceOnly }) => symbol === state.symbol.id && reduceOnly).map(({ groupId }) => groupId).filter(Boolean))].join(',')
@@ -1013,6 +1091,19 @@ function renderTradeLayer() {
   if (state.orderDraft) html.push(draftLines(state.orderDraft))
   layer.innerHTML = html.join('')
   positionTradeLayerElements()
+}
+
+function tradeMarkerLines() {
+  const headTimestamp = currentBar()?.timestamp
+  return state.paper.trades.flatMap((trade) => {
+    if (trade.event === 'balance-reset' || trade.symbol !== state.symbol.id) return []
+    const timestamp = trade.barTimestamp ?? trade.timestamp
+    if (!Number.isFinite(timestamp) || (state.mode === 'replay' && timestamp > headTimestamp)) return []
+    const markers = []
+    if (trade.openedQuantity > 0) markers.push(`<span class="trade-marker trade-marker-open" data-marker-timestamp="${timestamp}" data-marker-price="${trade.price}" aria-label="开仓">↑</span>`)
+    if (trade.closedQuantity > 0) markers.push(`<span class="trade-marker trade-marker-close" data-marker-timestamp="${timestamp}" data-marker-price="${trade.price}" aria-label="平仓">↓</span>`)
+    return markers
+  }).join('')
 }
 
 function workingOrderLines(order, position) {
@@ -1114,8 +1205,25 @@ function syncTradeLayerPosition() {
 
 function positionTradeLayerElements() {
   const layer = document.querySelector('#trade-layer')
+  layer.querySelectorAll('.trade-marker').forEach(positionTradeMarker)
   layer.querySelectorAll('.trade-line[data-price]').forEach(positionTradeLine)
   layer.querySelectorAll('.protection-zone').forEach(positionProtectionZone)
+}
+
+function positionTradeMarker(element) {
+  const timestamp = Number(element.dataset.markerTimestamp)
+  const price = Number(element.dataset.markerPrice)
+  const bar = state.bars.find(({ timestamp: value }) => value === timestamp)
+  if (!bar) return element.hidden = true
+  const coordinate = coreChart.convertToPixel({ timestamp }, { paneId: 'candle_pane', absolute: true })
+  const value = element.classList.contains('trade-marker-open') ? bar.low : bar.high
+  const top = tradePriceTop(value)
+  const canvas = document.querySelector('#chart canvas')
+  const main = document.querySelector('.tv-main')
+  if (!Number.isFinite(coordinate?.x) || !Number.isFinite(top) || !canvas || !main) return element.hidden = true
+  element.style.left = `${coordinate.x + canvas.getBoundingClientRect().left - main.getBoundingClientRect().left}px`
+  element.style.top = `${top + (element.classList.contains('trade-marker-open') ? 12 : -12)}px`
+  element.hidden = false
 }
 
 function positionTradeLine(element) {
@@ -1342,11 +1450,27 @@ document.querySelector('#paper-account').addEventListener('click', (event) => {
   closeChartContextMenu()
   updateReplayView()
 })
-document.querySelector('#paper-table').addEventListener('click', (event) => {
+document.querySelector('#paper-table').addEventListener('click', async (event) => {
   const cancel = event.target.closest('[data-cancel-order]')
-  if (cancel) cancelPaperOrder(state.paper, Number(cancel.dataset.cancelOrder), currentBar().timestamp)
-  if (event.target.closest('[data-close-position]')) closePaperPosition(state.paper, state.symbol.id, currentBar().close, currentBarIndex(), currentBar().timestamp)
-  updateReplayView()
+  if (cancel) {
+    cancelPaperOrder(state.paper, Number(cancel.dataset.cancelOrder), currentBar().timestamp)
+    updateReplayView()
+    return
+  }
+  const close = event.target.closest('[data-close-position-symbol]')
+  if (close) {
+    const symbol = close.dataset.closePositionSymbol
+    await jumpToPaperEvent(symbol, Number(close.closest('[data-paper-jump-symbol]')?.dataset.paperJumpTimestamp))
+    const position = paperPosition(state.paper, symbol)
+    closePaperPosition(state.paper, symbol, position.marketPrice || currentBar().close, currentBarIndex(), currentBar().timestamp)
+    updateReplayView()
+    return
+  }
+  const jump = event.target.closest('[data-paper-jump-symbol]')
+  if (jump) {
+    await jumpToPaperEvent(jump.dataset.paperJumpSymbol, Number(jump.dataset.paperJumpTimestamp))
+    return
+  }
 })
 document.querySelector('#chart-context-menu').addEventListener('click', async (event) => {
   const action = event.target.closest('button[data-context]')
