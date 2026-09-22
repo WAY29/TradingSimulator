@@ -254,8 +254,12 @@ const replayDatafeed = {
       ? end
       : focused ? Math.min(state.bars.length - 1, focusIndex + Math.floor(REPLAY_WINDOW / 2)) : end
     const firstVisible = state.bars[start]
-    if (!firstVisible || to < firstVisible.timestamp) return []
-    return state.bars.slice(start, visibleEnd + 1).filter((bar) => bar.timestamp >= from && bar.timestamp <= to)
+    const endTimestamp = state.bars[visibleEnd]?.timestamp
+    if (!firstVisible || !endTimestamp) return []
+    const loadingOlder = to < firstVisible.timestamp
+    if (loadingOlder && from < state.bars[0].timestamp) await loadOlderBars()
+    const minimum = loadingOlder ? from : Math.max(from, firstVisible.timestamp)
+    return state.bars.filter((bar) => bar.timestamp >= minimum && bar.timestamp <= Math.min(to, endTimestamp))
   },
   subscribe(_symbol, _period, callback) {
     liveSubscriber = callback
@@ -291,12 +295,37 @@ function chartSymbol(item) {
   }
 }
 
-async function loadBars(id = state.symbol.id, timeframe = state.timeframe) {
-  const response = await fetch(`/api/tradingview/history?symbol=${encodeURIComponent(id)}&timeframe=${encodeURIComponent(timeframe)}&range=1000`)
+async function loadBars(id = state.symbol.id, timeframe = state.timeframe, range = 1000, to) {
+  const params = new URLSearchParams({ symbol: id, timeframe, range })
+  if (to != null) params.set('to', to)
+  const response = await fetch(`/api/tradingview/history?${params}`)
   if (!response.ok) throw new Error(`TradingView HTTP ${response.status}`)
   const { bars } = await response.json()
-  if (bars.length < START_CONTEXT + 2) throw new Error('Not enough TradingView bars')
+  if (to == null && bars.length < START_CONTEXT + 2) throw new Error('Not enough TradingView bars')
   return bars
+}
+
+async function loadOlderBars() {
+  const symbol = state.symbol.id
+  const timeframe = state.timeframe
+  const firstTimestamp = state.bars[0]?.timestamp
+  if (!firstTimestamp) return
+  let bars
+  try {
+    bars = await loadBars(symbol, timeframe, 500, Math.floor(firstTimestamp / 1000))
+  } catch (error) {
+    console.error('Historical data load failed:', error)
+    showToast('更早的 K 线加载失败')
+    return
+  }
+  if (symbol !== state.symbol.id || timeframe !== state.timeframe) return
+  const older = bars.filter(({ timestamp }) => timestamp < firstTimestamp)
+  if (!older.length) return
+  state.bars.unshift(...older)
+  state.liveHead += older.length
+  state.replayStart += older.length
+  state.replayHead += older.length
+  state.replayEnd += older.length
 }
 
 function setupReplay(bars) {

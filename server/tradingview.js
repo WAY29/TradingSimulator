@@ -152,8 +152,8 @@ function connectQuotes() {
   DEFAULT_SYMBOLS.forEach(subscribeSymbol)
 }
 
-function fetchBars(symbol, timeframe, range) {
-  const key = `${symbol}:${timeframe}:${range}`
+function fetchBars(symbol, timeframe, range, to) {
+  const key = `${symbol}:${timeframe}:${range}:${to || ''}`
   const cached = cache.get(key)
   const maxAge = range <= 3 ? 10_000 : 60_000
   if (cached && Date.now() - cached.timestamp < maxAge) return Promise.resolve(cached.data)
@@ -198,7 +198,7 @@ function fetchBars(symbol, timeframe, range) {
       clearTimeout(settleTimer)
       settleTimer = setTimeout(finish, 100)
     })
-    chart.setMarket(symbol, { timeframe, range })
+    chart.setMarket(symbol, { timeframe, range, to })
   })
 }
 
@@ -243,11 +243,12 @@ tradingViewRouter.get('/history', async (request, response) => {
   const symbol = request.query.symbol || 'BINANCE:BTCUSDT'
   const timeframe = request.query.timeframe || 'D'
   const range = Math.min(1000, Math.max(2, Number(request.query.range) || 300))
-  if (!SYMBOL_PATTERN.test(symbol) || !ALLOWED_TIMEFRAMES.has(timeframe)) {
+  const to = request.query.to == null ? undefined : Number(request.query.to)
+  if (!SYMBOL_PATTERN.test(symbol) || !ALLOWED_TIMEFRAMES.has(timeframe) || (to != null && (!Number.isFinite(to) || to <= 0))) {
     return response.status(400).json({ error: 'Unsupported TradingView request' })
   }
   try {
-    const bars = (await fetchBars(symbol, timeframe, range))
+    const bars = (await fetchBars(symbol, timeframe, range, to))
       .filter((bar) => request.query.closed !== '1' || nextBarTimestamp(bar.timestamp, timeframe) <= Date.now())
     response.set('Cache-Control', 'no-store').json({ source: 'TradingView', symbol, timeframe, bars })
   } catch (error) {
