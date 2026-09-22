@@ -1,0 +1,23 @@
+{
+  "name": "trading-simulator",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "build": "vite build",
+    "test": "node src/paper.test.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@klinecharts/pro": "0.1.1",
+    "@mathieuc/tradingview": "3.5.2",
+    "axios": "1.20.0",
+    "express": "5.2.1",
+    "https-proxy-agent": "7.0.6",
+    "klinecharts": "9.8.12"
+  },
+  "devDependencies": {
+    "vite": "8.3.0"
+  }
+}
