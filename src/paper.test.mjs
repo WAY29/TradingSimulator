@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
 import {
   cancelPaperOrder,
+  closePaperPosition,
   createPaperAccount,
+  paperPosition,
   paperSummary,
   placePaperOrder,
   processPaperBar,
@@ -19,12 +21,14 @@ const account = createPaperAccount({ feeRate: 0, slippageRate: 0 })
 const firstEntry = placePaperOrder(account, {
   symbol: 'BINANCE:BTCUSDT', side: 'buy', type: 'market', quantity: 1, takeProfit: 110, stopLoss: 90,
 }, 100, 0, 1)
-assert.deepEqual(account.position, { quantity: 1, averagePrice: 100 })
+assert.deepEqual(paperPosition(account, 'BINANCE:BTCUSDT'), {
+  symbol: 'BINANCE:BTCUSDT', quantity: 1, averagePrice: 100, marketPrice: 100,
+})
 assert.equal(account.orders.length, 2)
 assert.equal(firstEntry.groupId, 1)
 assert.deepEqual(account.orders.map(({ groupId }) => groupId), [1, 1])
 processPaperBar(account, { timestamp: 2, open: 100, high: 111, low: 95 }, 'BINANCE:BTCUSDT', 1)
-assert.equal(account.position.quantity, 0)
+assert.equal(paperPosition(account, 'BINANCE:BTCUSDT').quantity, 0)
 assert.equal(account.realizedPnl, 10)
 assert.equal(account.orders.length, 0)
 
@@ -33,19 +37,20 @@ const limit = placePaperOrder(account, {
 }, 100, 2, 3)
 assert.equal(limit.groupId, 2)
 processPaperBar(account, { timestamp: 4, open: 100, high: 102, low: 91 }, 'BINANCE:BTCUSDT', 3)
-assert.equal(account.position.quantity, 0)
+assert.equal(paperPosition(account, 'BINANCE:BTCUSDT').quantity, 0)
 processPaperBar(account, { timestamp: 5, open: 92, high: 94, low: 89 }, 'BINANCE:BTCUSDT', 4)
-assert.equal(account.position.quantity, 2)
-assert.equal(account.position.averagePrice, 90)
+assert.equal(paperPosition(account, 'BINANCE:BTCUSDT').quantity, 2)
+assert.equal(paperPosition(account, 'BINANCE:BTCUSDT').averagePrice, 90)
 assert.equal(limit.status, 'filled')
 
 placePaperOrder(account, {
   symbol: 'BINANCE:BTCUSDT', side: 'sell', type: 'market', quantity: 3,
 }, 95, 5, 6)
-assert.deepEqual(account.position, { quantity: -1, averagePrice: 95 })
+assert.equal(paperPosition(account, 'BINANCE:BTCUSDT').quantity, -1)
+assert.equal(paperPosition(account, 'BINANCE:BTCUSDT').averagePrice, 95)
 assert.equal(account.realizedPnl, 20)
 assert.equal(account.trades[0].realizedPnl, 10)
-assert.equal(paperSummary(account, 90).unrealizedPnl, 5)
+assert.equal(paperSummary(account, 90, 'BINANCE:BTCUSDT').unrealizedPnl, 5)
 
 const pending = placePaperOrder(account, {
   symbol: 'BINANCE:BTCUSDT', side: 'sell', type: 'limit', quantity: 1, price: 100,
@@ -59,14 +64,14 @@ placePaperOrder(conservative, {
 }, 100, 0, 1)
 processPaperBar(conservative, { timestamp: 2, open: 100, high: 111, low: 89 }, 'BINANCE:BTCUSDT', 1)
 assert.equal(conservative.realizedPnl, -10)
-assert.equal(conservative.position.quantity, 0)
+assert.equal(paperPosition(conservative, 'BINANCE:BTCUSDT').quantity, 0)
 
 const tradeCount = account.trades.length
 placePaperOrder(account, {
   symbol: 'BINANCE:BTCUSDT', side: 'buy', type: 'limit', quantity: 1, price: 80,
 }, 90, 7, 9)
 resetPaperAccount(account, 100_000, 10)
-assert.equal(account.position.quantity, 0)
+assert.equal(Object.keys(account.positions).length, 0)
 assert.equal(account.orders.length, 0)
 assert.equal(account.initialBalance, 100_000)
 assert.equal(account.realizedPnl, 0)
@@ -78,14 +83,34 @@ assert.deepEqual(account.trades[0], {
 assert.equal(account.orderHistory[0].status, 'cancelled')
 
 const legacy = createPaperAccount()
+legacy.position = { quantity: 1, averagePrice: 100 }
 delete legacy.nextGroupId
 legacy.orders = [
-  { id: 3, parentId: 2 },
-  { id: 4, parentId: 2 },
-  { id: 5, parentId: null },
+  { id: 3, parentId: 2, symbol: 'BINANCE:BTCUSDT', reduceOnly: true },
+  { id: 4, parentId: 2, symbol: 'BINANCE:BTCUSDT', reduceOnly: true },
+  { id: 5, parentId: null, symbol: 'BINANCE:BTCUSDT' },
 ]
 normalizePaperAccount(legacy)
 assert.deepEqual(legacy.orders.map(({ groupId }) => groupId), [1, 1, 2])
 assert.equal(legacy.nextGroupId, 3)
+assert.equal(paperPosition(legacy, 'BINANCE:BTCUSDT').quantity, 1)
+
+const multi = createPaperAccount({ feeRate: 0, slippageRate: 0 })
+placePaperOrder(multi, {
+  symbol: 'BINANCE:BTCUSDT', side: 'buy', type: 'market', quantity: 1,
+}, 100, 0, 1)
+placePaperOrder(multi, {
+  symbol: 'BINANCE:ETHUSDT', side: 'buy', type: 'market', quantity: 2,
+}, 2_000, 0, 1)
+const ethOrder = placePaperOrder(multi, {
+  symbol: 'BINANCE:ETHUSDT', side: 'buy', type: 'limit', quantity: 1, price: 1_900,
+}, 2_000, 0, 2)
+processPaperBar(multi, { timestamp: 3, open: 100, high: 105, low: 90, close: 102 }, 'BINANCE:BTCUSDT', 1)
+assert.equal(multi.orders.includes(ethOrder), true)
+assert.equal(paperPosition(multi, 'BINANCE:BTCUSDT').quantity, 1)
+assert.equal(paperPosition(multi, 'BINANCE:ETHUSDT').quantity, 2)
+closePaperPosition(multi, 'BINANCE:BTCUSDT', 102, 2, 4)
+assert.equal(paperPosition(multi, 'BINANCE:BTCUSDT').quantity, 0)
+assert.equal(paperPosition(multi, 'BINANCE:ETHUSDT').quantity, 2)
 
 console.log('paper trading checks passed')

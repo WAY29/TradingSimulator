@@ -6,6 +6,7 @@ import {
   createPaperAccount,
   normalizePaperAccount,
   paperSummary,
+  paperPosition,
   placePaperOrder,
   positionProtection,
   processPaperBar,
@@ -407,12 +408,12 @@ function applyPaperState(saved) {
   state.paper = {
     ...empty,
     ...saved.paper,
-    position: { ...empty.position, ...saved.paper.position },
+    positions: saved.paper.positions || empty.positions,
     orders: saved.paper.orders || [],
     orderHistory: saved.paper.orderHistory || [],
     trades: saved.paper.trades || [],
   }
-  normalizePaperAccount(state.paper)
+  normalizePaperAccount(state.paper, saved.session.symbol?.id)
   state.paperTab = saved.session.paperTab || 'positions'
   state.paperPanelOpen = Boolean(saved.session.paperPanelOpen)
   if (saved.session.mode === 'replay' && validSymbol(saved.session.symbol) && TIMEFRAMES.some(({ id }) => id === saved.session.timeframe)) {
@@ -438,7 +439,7 @@ function restoreReplaySession() {
 
 function paperStateSnapshot() {
   return {
-    version: 1,
+    version: 2,
     paper: state.paper,
     session: {
       mode: state.mode === 'replay' ? 'replay' : 'live',
@@ -498,7 +499,7 @@ function setPaperPanelOpen(open, { save = true } = {}) {
 
 function renderPaperPanel() {
   const price = currentBar().close
-  const summary = paperSummary(state.paper, price)
+  const summary = paperSummary(state.paper, price, state.symbol.id)
   document.querySelector('#paper-account').innerHTML = [
     ['Account balance', summary.balance],
     ['Equity', summary.equity],
@@ -509,7 +510,7 @@ function renderPaperPanel() {
   ].map(([label, value], index) => `
     <span><small>${label}${index === 0 ? '<button class="balance-reset" data-reset-balance title="重置模拟账户" aria-label="重置模拟账户">↻</button>' : ''}</small><strong class="${label.includes('PnL') ? signClass(value) : ''}">${formatMoney(value)}</strong></span>
   `).join('')
-  document.querySelector('#positions-count').textContent = state.paper.position.quantity ? '1' : '0'
+  document.querySelector('#positions-count').textContent = paperPosition(state.paper, state.symbol.id).quantity ? '1' : '0'
   document.querySelector('#orders-count').textContent = state.paper.orders.length
   document.querySelectorAll('#paper-tabs button').forEach((button) => {
     button.classList.toggle('active', button.dataset.paperTab === state.paperTab)
@@ -525,9 +526,9 @@ function paperTable(tab, price) {
 }
 
 function positionsTable(price) {
-  const position = state.paper.position
+  const position = paperPosition(state.paper, state.symbol.id)
   if (!position.quantity) return paperEmpty('No positions')
-  const protection = positionProtection(state.paper)
+  const protection = positionProtection(state.paper, state.symbol.id)
   const pnl = position.quantity * (price - position.averagePrice)
   const pnlPercent = pnl / Math.abs(position.quantity * position.averagePrice) * 100
   return `
@@ -722,7 +723,10 @@ async function switchSymbol(item) {
     saveChartPreferences()
     renderIdentity()
     renderWatchlist()
+    coreChart.clearData()
     chart.setSymbol(chartSymbol(state.symbol))
+    coreChart.applyNewData(state.bars.slice(Math.max(0, state.liveHead - REPLAY_WINDOW + 1), state.liveHead + 1), true)
+    window.requestAnimationFrame(() => coreChart.scrollToRealTime())
     setPaperPanelOpen(state.paperPanelOpen, { save: false })
     updateReplayView()
     connectQuoteStream()
@@ -986,12 +990,12 @@ function renderTradeLayer() {
     layer.replaceChildren()
     return
   }
-  const position = state.paper.position
+  const position = paperPosition(state.paper, state.symbol.id)
   const price = currentBar().close
   const html = []
   if (position.quantity) {
     const pnl = position.quantity * (price - position.averagePrice)
-    const groups = [...new Set(state.paper.orders.filter(({ reduceOnly }) => reduceOnly).map(({ groupId }) => groupId).filter(Boolean))].join(',')
+    const groups = [...new Set(state.paper.orders.filter(({ symbol, reduceOnly }) => symbol === state.symbol.id && reduceOnly).map(({ groupId }) => groupId).filter(Boolean))].join(',')
     html.push(orderLine({
       classes: 'position-line',
       price: position.averagePrice,
@@ -1003,7 +1007,7 @@ function renderTradeLayer() {
       showPrice: false,
     }))
   }
-  state.paper.orders.forEach((order) => {
+  state.paper.orders.filter(({ symbol }) => symbol === state.symbol.id).forEach((order) => {
     html.push(workingOrderLines(order, position))
   })
   if (state.orderDraft) html.push(draftLines(state.orderDraft))
@@ -1171,6 +1175,7 @@ function beginWorkingProtectionDrag(event, element) {
   if (event.target.closest('button')) return
   event.preventDefault()
   const root = document.querySelector('#chart [k-line-chart-id]')
+  const position = paperPosition(state.paper, state.symbol.id)
   let moved = false
   const move = (moveEvent) => {
     const point = coreChart.convertFromPixel(
@@ -1183,10 +1188,10 @@ function beginWorkingProtectionDrag(event, element) {
     if (parent) {
       const field = element.dataset.protectionField
       parent[field] = constrainProtection(field, point.value, parent)
-    } else if (protection && state.paper.position.quantity) {
+    } else if (protection && position.quantity) {
       const field = protection.role === 'take-profit' ? 'takeProfit' : 'stopLoss'
-      const side = state.paper.position.quantity > 0 ? 'buy' : 'sell'
-      protection.price = constrainProtection(field, point.value, { side, price: state.paper.position.averagePrice })
+      const side = position.quantity > 0 ? 'buy' : 'sell'
+      protection.price = constrainProtection(field, point.value, { side, price: position.averagePrice })
     } else {
       return
     }
