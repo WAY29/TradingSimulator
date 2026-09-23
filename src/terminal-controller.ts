@@ -252,6 +252,7 @@ function chartSymbol(item: MarketSymbol): SymbolInfo {
   return {
     exchange: item.id.split(':')[0], market: item.type || 'crypto', name: item.description,
     shortName: item.symbol, ticker: item.symbol, priceCurrency: quoteCurrency(item.symbol), type: (item.type || 'spot').toUpperCase(),
+    pricePrecision: priceDigits(state.bars.at(-1)?.close ?? 0, state.currentQuote?.priceScale),
   }
 }
 
@@ -337,6 +338,12 @@ export function mountChart(container: HTMLElement) {
   if (state.bars.length && !chart) renderChart()
 }
 
+export function resizeChart() {
+  if (!coreChart) return
+  coreChart.resize()
+  scheduleTradeLayerPosition()
+}
+
 export function unmountChart() {
   pineGeneration++
   removePineIndicator()
@@ -403,6 +410,7 @@ function bindChartInteractions() {
   if (state.pineSource) void applyPineScript(state.pineSource).catch((error: unknown) => {
     if (coreChart === core) showToast(`Pine Script: ${error instanceof Error ? error.message : String(error)}`)
   })
+  resizeChart()
   renderTradeLayer()
 }
 
@@ -520,6 +528,12 @@ function positionReplaySelector(timestamp: number) {
 
 function refreshChart() {
   chart?.setPeriod({ ...currentTimeframe().period })
+}
+
+function resetPriceAxis() {
+  const core = coreChart
+  // KLineChart resets its manual Y-axis range when the axis type is reapplied.
+  if (core) core.setStyles({ yAxis: { type: core.getStyles().yAxis.type } })
 }
 
 function nextBarTimestamp(timestamp: number) {
@@ -809,6 +823,7 @@ async function switchSymbol(item: MarketSymbol, jumpTimestamp: number | null = n
     saveChartPreferences()
     const core = coreChart
     if (core && chart) {
+      resetPriceAxis()
       core.clearData()
       chart.setSymbol(chartSymbol(state.symbol))
       core.applyNewData(chartWindowData(), true)
@@ -848,6 +863,7 @@ export async function switchTimeframe(timeframe: string) {
     setupReplay(bars)
     saveChartPreferences()
     notify()
+    resetPriceAxis()
     chart?.setPeriod({ ...currentTimeframe().period })
     refreshPineIndicator()
     updateReplayView()
@@ -887,6 +903,7 @@ function jumpToChartTimestamp(timestamp: number) {
     || state.bars.reduce((closest, bar) => Math.abs(bar.timestamp - timestamp) < Math.abs(closest.timestamp - timestamp) ? bar : closest, state.bars[0])
   if (!target || !coreChart) return
   state.focusTimestamp = target.timestamp
+  resetPriceAxis()
   coreChart.applyNewData(chartWindowData(), true)
   window.requestAnimationFrame(() => {
     coreChart?.scrollToTimestamp(target.timestamp, 300)
@@ -989,7 +1006,10 @@ export function startBarSelection() {
   state.mode = 'select'
   state.selectionTimestamp = null
   state.replaySelectorLeft = null
-  if (wasReplay) refreshChart()
+  if (wasReplay) {
+    resetPriceAxis()
+    refreshChart()
+  }
   updateReplayView()
 }
 
@@ -1003,6 +1023,7 @@ function selectReplayBar(timestamp: number) {
   state.mode = 'replay'
   state.selectionTimestamp = timestamp
   showReplayWorkspace()
+  resetPriceAxis()
   refreshChart()
   updateReplayView()
   window.dispatchEvent(new Event('resize'))
@@ -1023,7 +1044,10 @@ export function exitReplay() {
   closeChartContextMenu()
   renderTradeLayer()
   persistPaperState()
-  if (shouldRefresh) refreshChart()
+  if (shouldRefresh) {
+    resetPriceAxis()
+    refreshChart()
+  }
   updateMarketDetails()
   notify()
   window.dispatchEvent(new Event('resize'))

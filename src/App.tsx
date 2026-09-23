@@ -265,8 +265,14 @@ function ChartHost({ controller }: { controller: TerminalController | null }) {
   const container = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!controller || !container.current) return
-    controller.mountChart(container.current)
-    return () => controller.unmountChart()
+    const host = container.current
+    controller.mountChart(host)
+    const observer = new ResizeObserver(() => controller.resizeChart())
+    observer.observe(host)
+    return () => {
+      observer.disconnect()
+      controller.unmountChart()
+    }
   }, [controller])
   return <div id="chart" className="chart-host" ref={container} />
 }
