@@ -192,6 +192,7 @@ export interface ControllerState {
   marketDetails: Pick<Quote, 'price' | 'change' | 'changePct' | 'volume' | 'priceScale' | 'logoId'> | null
   speedMenuOpen: boolean
   timeframeMenuOpen: boolean
+  pineSource: string
   contextMenu: ContextMenu | null
   replaySelectorLeft: number | null
 }

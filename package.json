@@ -6,13 +6,14 @@
   "scripts": {
     "dev": "node --experimental-strip-types server.ts",
     "build": "vite build",
-    "test": "node --experimental-strip-types src/paper.test.ts",
+    "test": "node --experimental-strip-types src/paper.test.ts && node --import @nullarch/resin/register --experimental-strip-types src/pine.test.ts",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview"
   },
   "dependencies": {
     "@klinecharts/pro": "0.1.1",
     "@mathieuc/tradingview": "3.5.2",
+    "@nullarch/resin": "^0.2.2",
     "axios": "1.20.0",
     "express": "5.2.1",
     "https-proxy-agent": "7.0.6",

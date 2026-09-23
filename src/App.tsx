@@ -9,6 +9,7 @@ type PanelData = ReturnType<TerminalController['getPaperPanelData']>
 
 function TerminalShell() {
   const [controller, setController] = useState<TerminalController | null>(null)
+  const [pineOpen, setPineOpen] = useState(false)
   const [, refresh] = useState(0)
 
   useEffect(() => {
@@ -71,17 +72,28 @@ function TerminalShell() {
 
   return (
     <main className={`terminal ${modeClass} ${paperClass}`} style={{ ['--paper-panel-height' as string]: `${controllerState?.paperPanelHeight || 260}px` }}>
-      <Toolbar controller={controller} />
+      <Toolbar controller={controller} onPine={() => setPineOpen(true)} />
       <ChartWorkspace controller={controller} />
       <ReplayDock controller={controller} />
       <PaperPanel controller={controller} />
       <SymbolDialog controller={controller} />
+      <PineDialog controller={controller} open={pineOpen} onClose={() => setPineOpen(false)} />
       <StatusLayer controller={controller} />
     </main>
   )
 }
 
-function Toolbar({ controller }: { controller: TerminalController | null }) {
+function Toolbar({ controller, onPine }: { controller: TerminalController | null; onPine: () => void }) {
+  const [indicatorMenuOpen, setIndicatorMenuOpen] = useState(false)
+  const indicatorMenuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!indicatorMenuOpen) return
+    const dismiss = (event: MouseEvent) => { if (!indicatorMenuRef.current?.contains(event.target as Node)) setIndicatorMenuOpen(false) }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setIndicatorMenuOpen(false) }
+    document.addEventListener('click', dismiss)
+    document.addEventListener('keydown', escape)
+    return () => { document.removeEventListener('click', dismiss); document.removeEventListener('keydown', escape) }
+  }, [indicatorMenuOpen])
   const state = controller?.getControllerState()
   const currentTimeframe = TIMEFRAMES.find(({ id }) => id === state?.timeframe)
   const favoriteTimeframes: string[] = state?.favoriteTimeframes || []
@@ -114,12 +126,59 @@ function Toolbar({ controller }: { controller: TerminalController | null }) {
             })}
           </div>
         </div>
-        <button className="toolbar-button text-button" id="indicators" title="指标" onClick={() => controller?.openIndicators()}>fx<span className="mobile-hide">&nbsp; 指标</span></button>
+        <div className="indicator-control" ref={indicatorMenuRef}>
+          <button className="toolbar-button text-button" id="indicators" title="指标" aria-expanded={indicatorMenuOpen} onClick={() => setIndicatorMenuOpen(!indicatorMenuOpen)}>fx<span className="mobile-hide">&nbsp; 指标</span></button>
+          {indicatorMenuOpen && <div className="indicator-menu" role="group" aria-label="指标选项">
+            <button onClick={() => { setIndicatorMenuOpen(false); controller?.openIndicators() }}>内置指标</button>
+            <button onClick={() => { setIndicatorMenuOpen(false); onPine() }}>Pine Script</button>
+          </div>}
+        </div>
         <button className="toolbar-button replay-toggle" id="replay-toggle" title="Bar Replay" onClick={() => controller?.toggleReplay()}>◁<span className="mobile-hide">&nbsp; Replay</span></button>
       </div>
       <div className="toolbar-right"><button className="paper-toggle" id="paper-toggle" title="模拟交易" onClick={() => controller?.setPaperPanelOpen(!state?.paperPanelOpen)}>模拟交易</button></div>
     </header>
   )
+}
+
+const PINE_EXAMPLE = '//@version=6\nindicator("EMA 20", overlay=true)\nplot(ta.ema(close, 20), "EMA 20", color=color.aqua)'
+
+function PineDialog({ controller, open, onClose }: { controller: TerminalController | null; open: boolean; onClose: () => void }) {
+  const [source, setSource] = useState(PINE_EXAMPLE)
+  const [error, setError] = useState('')
+  const [pending, setPending] = useState(false)
+  const active = Boolean(controller?.getControllerState().pineSource)
+  useEffect(() => { if (open) { setSource(controller?.getControllerState().pineSource || PINE_EXAMPLE); setError('') } }, [open, controller])
+  useEffect(() => {
+    if (!open) return
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !pending) onClose() }
+    document.addEventListener('keydown', escape)
+    return () => document.removeEventListener('keydown', escape)
+  }, [open, onClose, pending])
+  if (!open) return null
+  const apply = async () => {
+    if (!controller || pending) return
+    setPending(true)
+    setError('')
+    try {
+      await controller.applyPineScript(source)
+      onClose()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setPending(false)
+    }
+  }
+  return <div className="pine-dialog" onMouseDown={(event) => { if (event.target === event.currentTarget && !pending) onClose() }}>
+    <section className="pine-modal" role="dialog" aria-modal="true" aria-labelledby="pine-title">
+      <header><strong id="pine-title">Pine Script</strong><button title="关闭" aria-label="关闭" disabled={pending} onClick={onClose}>×</button></header>
+      <textarea aria-label="Pine Script 代码" spellCheck={false} value={source} onChange={(event) => setSource(event.target.value)} autoFocus />
+      {error && <div className="pine-error" role="alert">{error}</div>}
+      <footer>
+        {active && <button className="pine-remove" disabled={pending} onClick={() => { controller?.clearPineScript(); onClose() }}>移除指标</button>}
+        <button className="pine-apply" disabled={pending || !source.trim()} onClick={apply}>{pending ? '运行中…' : active ? '更新指标' : '添加到图表'}</button>
+      </footer>
+    </section>
+  </div>
 }
 
 function ChartWorkspace({ controller }: { controller: TerminalController | null }) {
