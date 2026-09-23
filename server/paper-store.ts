@@ -3,7 +3,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { Router } from 'express'
-import { ALLOWED_TIMEFRAMES, SYMBOL_PATTERN } from './tradingview.js'
+import { ALLOWED_TIMEFRAMES, SYMBOL_PATTERN } from './tradingview.ts'
+import type { PaperAccount } from '../src/types.ts'
 
 const dataDirectory = join(dirname(fileURLToPath(import.meta.url)), '..', '.data')
 mkdirSync(dataDirectory, { recursive: true })
@@ -22,12 +23,18 @@ const writeState = database.prepare(`
   ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at
 `)
 
-function isValidState(state) {
+function isValidState(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const state = value as {
+    version: number
+    paper: Partial<PaperAccount> & { position?: { quantity: number; averagePrice: number } }
+    session?: { symbol?: { id: string }; timeframe: string; mode: string; replayTimestamp?: number }
+  }
   if (!state || ![1, 2].includes(state.version) || typeof state.paper !== 'object' || !state.paper) return false
   const { paper, session } = state
   if (![paper.initialBalance, paper.realizedPnl, paper.feeRate, paper.slippageRate].every(Number.isFinite)) return false
-  if (!Number.isInteger(paper.nextOrderId) || paper.nextOrderId < 1) return false
-  if (!Number.isInteger(paper.nextGroupId) || paper.nextGroupId < 1) return false
+  if (!Number.isInteger(paper.nextOrderId) || (paper.nextOrderId ?? 0) < 1) return false
+  if (!Number.isInteger(paper.nextGroupId) || (paper.nextGroupId ?? 0) < 1) return false
   if (state.version === 1 && (!paper.position || ![paper.position.quantity, paper.position.averagePrice].every(Number.isFinite))) return false
   if (state.version === 2) {
     if (!paper.positions || typeof paper.positions !== 'object' || Array.isArray(paper.positions)) return false
@@ -48,7 +55,7 @@ export const paperRouter = Router()
 
 paperRouter.get('/state', (_request, response) => {
   const row = readState.get()
-  response.set('Cache-Control', 'no-store').type('json').send(row?.payload || 'null')
+  response.set('Cache-Control', 'no-store').type('json').send(String(row?.payload || 'null'))
 })
 
 paperRouter.put('/state', (request, response) => {

@@ -39,6 +39,7 @@ button:disabled { cursor: not-allowed; opacity: .38; }
 .timeframe-favorites button:hover, .timeframe-more:hover { background: #1e222d; }
 .timeframe-favorites button.active { color: #f0f3fa; background: #2a2e39; }
 .timeframe-more { min-width: 28px; margin-right: 6px; padding: 0 5px; color: #b2b5be; }
+.mobile-timeframe { display: none; }
 .chevron-icon { display: inline-block; width: 7px; height: 7px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: translateY(-2px) rotate(45deg); }
 .timeframe-menu { position: absolute; top: 43px; right: 4px; z-index: 60; width: 220px; padding: 6px 0; border: 1px solid #363a45; border-radius: 6px; background: #1e222d; box-shadow: 0 8px 24px rgba(0, 0, 0, .48); }
 .timeframe-menu[hidden] { display: none; }
@@ -293,4 +294,16 @@ button:disabled { cursor: not-allowed; opacity: .38; }
   .paper-account { grid-template-columns: repeat(3, minmax(110px, 1fr)); height: 82px; overflow: hidden; }
   .replay-controls { position: static; width: 100%; transform: none; justify-content: center; }
   .market-identity small, .header-change { display: none; }
+}
+
+@media (max-width: 600px) {
+  .app-logo, .header-price, .timeframe-favorites, .mobile-hide { display: none; }
+  .tv-toolbar { padding: 0 6px; }
+  .toolbar-left { gap: 4px; }
+  .toolbar-right { margin-left: 4px; }
+  .market-identity { gap: 5px; padding-right: 6px; }
+  .timeframe-more { display: flex; align-items: center; gap: 5px; margin-right: 0; }
+  .mobile-timeframe { display: inline; }
+  .toolbar-button { padding: 0 6px; }
+  .paper-toggle { padding: 0 8px; }
 }

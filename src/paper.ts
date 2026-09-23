@@ -1,4 +1,6 @@
-export function createPaperAccount({ initialBalance = 100_000, feeRate = 0.001, slippageRate = 0.0005 } = {}) {
+import type { OrderSide, OrderType, PaperAccount, PaperBar, PaperOrder, PaperOrderInput, PaperPosition } from './types'
+
+export function createPaperAccount({ initialBalance = 100_000, feeRate = 0.001, slippageRate = 0.0005 } = {}): PaperAccount {
   return {
     initialBalance,
     feeRate,
@@ -13,7 +15,7 @@ export function createPaperAccount({ initialBalance = 100_000, feeRate = 0.001, 
   }
 }
 
-export function placePaperOrder(account, input, marketPrice, barIndex, timestamp = Date.now()) {
+export function placePaperOrder(account: PaperAccount, input: PaperOrderInput, marketPrice: number, barIndex: number, timestamp = Date.now()): PaperOrder {
   const quantity = Number(input.quantity)
   const type = input.type || 'market'
   const price = type === 'market' ? marketPrice : Number(input.price)
@@ -28,7 +30,7 @@ export function placePaperOrder(account, input, marketPrice, barIndex, timestamp
     if (openingQuantity * price > paperSummary(account, marketPrice, input.symbol).availableFunds) throw new Error('可用资金不足')
   }
 
-  const order = {
+  const order: PaperOrder = {
     id: account.nextOrderId++,
     groupId: input.groupId ?? (!input.reduceOnly ? account.nextGroupId++ : null),
     symbol: input.symbol,
@@ -57,10 +59,10 @@ export function placePaperOrder(account, input, marketPrice, barIndex, timestamp
   return order
 }
 
-export function processPaperBar(account, bar, symbol, barIndex) {
+export function processPaperBar(account: PaperAccount, bar: PaperBar, symbol: string, barIndex: number): PaperOrder[] {
   const position = account.positions[symbol]
-  if (position && Number.isFinite(bar.close)) position.marketPrice = bar.close
-  const fills = []
+  if (position && bar.close != null && Number.isFinite(bar.close)) position.marketPrice = bar.close
+  const fills: PaperOrder[] = []
   const working = account.orders
     .filter((order) => order.symbol === symbol && order.activeAt <= bar.timestamp)
     .sort((a, b) => Number(b.role === 'stop-loss') - Number(a.role === 'stop-loss'))
@@ -73,18 +75,18 @@ export function processPaperBar(account, bar, symbol, barIndex) {
   return fills
 }
 
-export function processPaperBars(account, bars, symbol) {
+export function processPaperBars(account: PaperAccount, bars: PaperBar[], symbol: string): PaperOrder[] {
   return bars.flatMap((bar, index) => processPaperBar(account, bar, symbol, index))
 }
 
-export function cancelPaperOrder(account, id, timestamp = Date.now()) {
+export function cancelPaperOrder(account: PaperAccount, id: number, timestamp = Date.now()) {
   const order = account.orders.find((item) => item.id === id)
   if (!order) return false
   finishOrder(account, order, 'cancelled', timestamp)
   return true
 }
 
-export function closePaperPosition(account, symbol, marketPrice, barIndex, timestamp = Date.now()) {
+export function closePaperPosition(account: PaperAccount, symbol: string, marketPrice: number, barIndex: number, timestamp = Date.now()) {
   const quantity = paperPosition(account, symbol).quantity
   if (!quantity) return null
   return placePaperOrder(account, {
@@ -96,7 +98,7 @@ export function closePaperPosition(account, symbol, marketPrice, barIndex, times
   }, marketPrice, barIndex, timestamp)
 }
 
-export function resetPaperAccount(account, balance = 100_000, timestamp = Date.now()) {
+export function resetPaperAccount(account: PaperAccount, balance = 100_000, timestamp = Date.now()) {
   account.orders.slice().forEach((order) => finishOrder(account, order, 'cancelled', timestamp))
   account.initialBalance = balance
   account.realizedPnl = 0
@@ -110,7 +112,7 @@ export function resetPaperAccount(account, balance = 100_000, timestamp = Date.n
   })
 }
 
-export function paperSummary(account, marketPrice, symbol) {
+export function paperSummary(account: PaperAccount, marketPrice: number, symbol: string) {
   const positions = Object.values(account.positions)
   const unrealizedPnl = positions.reduce((sum, position) => {
     const price = position.symbol === symbol ? marketPrice : position.marketPrice
@@ -135,11 +137,11 @@ export function paperSummary(account, marketPrice, symbol) {
   }
 }
 
-export function paperPosition(account, symbol) {
+export function paperPosition(account: PaperAccount, symbol: string): PaperPosition {
   return account.positions[symbol] || { symbol, quantity: 0, averagePrice: 0, marketPrice: 0 }
 }
 
-export function positionProtection(account, symbol) {
+export function positionProtection(account: PaperAccount, symbol: string) {
   const orders = account.orders.filter((order) => order.symbol === symbol && order.reduceOnly)
   return {
     takeProfit: orders.find((order) => order.role === 'take-profit')?.price ?? null,
@@ -147,11 +149,11 @@ export function positionProtection(account, symbol) {
   }
 }
 
-export function projectedPnl(side, quantity, entryPrice, exitPrice) {
+export function projectedPnl(side: OrderSide, quantity: number, entryPrice: number, exitPrice: number) {
   return Number(quantity) * (Number(exitPrice) - Number(entryPrice)) * (side === 'buy' ? 1 : -1)
 }
 
-export function pagePaperHistory(items, { symbol = '', side = '', page = 1, pageSize = 10 } = {}) {
+export function pagePaperHistory<T extends { symbol?: string; side?: string }>(items: T[], { symbol = '', side = '', page = 1, pageSize = 10 }: { symbol?: string; side?: string; page?: number; pageSize?: number } = {}) {
   const filtered = items.filter((item) => (!symbol || item.symbol === symbol) && (!side || item.side === side))
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
   const currentPage = Math.min(Math.max(1, page), pageCount)
@@ -163,7 +165,7 @@ export function pagePaperHistory(items, { symbol = '', side = '', page = 1, page
   }
 }
 
-export function normalizePaperAccount(account, fallbackSymbol) {
+export function normalizePaperAccount(account: PaperAccount, fallbackSymbol?: string) {
   account.positions ||= {}
   const legacy = account.position
   if (legacy) {
@@ -179,25 +181,25 @@ export function normalizePaperAccount(account, fallbackSymbol) {
     position.symbol = symbol
     if (!Number.isFinite(position.marketPrice)) position.marketPrice = position.averagePrice
   })
-  const groups = new Map()
+  const groups = new Map<string, number>()
   let next = Number.isInteger(account.nextGroupId) && account.nextGroupId > 0 ? account.nextGroupId : 1
-  const groupKey = (order) => order.parentId == null ? `order:${order.id}` : `order:${order.parentId}`
+  const groupKey = (order: PaperOrder) => order.parentId == null ? `order:${order.id}` : `order:${order.parentId}`
   account.orders.forEach((order) => {
-    if (!Number.isInteger(order.groupId) || order.groupId < 1) return
+    if (order.groupId == null || !Number.isInteger(order.groupId) || order.groupId < 1) return
     groups.set(groupKey(order), order.groupId)
     next = Math.max(next, order.groupId + 1)
   })
   account.orders.forEach((order) => {
     const key = groupKey(order)
     if (!groups.has(key)) groups.set(key, next++)
-    order.groupId = groups.get(key)
+    order.groupId = groups.get(key)!
     if (!Number.isFinite(order.activeAt)) order.activeAt = Number.isFinite(order.createdAt) ? order.createdAt : 0
   })
   account.nextGroupId = next
   return account
 }
 
-function validateOrder(side, type, quantity, price, marketPrice) {
+function validateOrder(side: OrderSide, type: OrderType, quantity: number, price: number, marketPrice: number) {
   if (!['buy', 'sell'].includes(side)) throw new Error('请选择买入或卖出')
   if (!['market', 'limit', 'stop'].includes(type)) throw new Error('订单类型无效')
   if (!Number.isFinite(quantity) || quantity <= 0) throw new Error('数量必须大于 0')
@@ -210,7 +212,7 @@ function validateOrder(side, type, quantity, price, marketPrice) {
   }
 }
 
-function validateProtection(side, entryPrice, takeProfit, stopLoss) {
+function validateProtection(side: OrderSide, entryPrice: number, takeProfit?: number | null, stopLoss?: number | null) {
   const tp = numberOrNull(takeProfit)
   const sl = numberOrNull(stopLoss)
   if (tp != null && ((side === 'buy' && tp <= entryPrice) || (side === 'sell' && tp >= entryPrice))) {
@@ -221,24 +223,24 @@ function validateProtection(side, entryPrice, takeProfit, stopLoss) {
   }
 }
 
-function numberOrNull(value) {
+function numberOrNull(value: unknown): number | null {
   if (value == null || value === '') return null
   const number = Number(value)
   return Number.isFinite(number) ? number : null
 }
 
-function isTriggered(order, bar) {
+function isTriggered(order: PaperOrder, bar: PaperBar) {
   if (order.type === 'limit') return order.side === 'buy' ? bar.low <= order.price : bar.high >= order.price
   if (order.type === 'stop') return order.side === 'buy' ? bar.high >= order.price : bar.low <= order.price
   return false
 }
 
-function triggeredPrice(order, bar) {
+function triggeredPrice(order: PaperOrder, bar: PaperBar) {
   if (order.type === 'limit') return order.side === 'buy' ? Math.min(order.price, bar.open) : Math.max(order.price, bar.open)
   return order.side === 'buy' ? Math.max(order.price, bar.open) : Math.min(order.price, bar.open)
 }
 
-function fillOrder(account, order, price, barIndex, timestamp) {
+function fillOrder(account: PaperAccount, order: PaperOrder, price: number, barIndex: number, timestamp: number) {
   let quantity = order.quantity
   if (order.reduceOnly) {
     const position = paperPosition(account, order.symbol)
@@ -292,7 +294,7 @@ function fillOrder(account, order, price, barIndex, timestamp) {
   return true
 }
 
-function applyPositionFill(account, symbol, side, quantity, price) {
+function applyPositionFill(account: PaperAccount, symbol: string, side: OrderSide, quantity: number, price: number) {
   const position = account.positions[symbol] ||= { symbol, quantity: 0, averagePrice: 0, marketPrice: price }
   position.marketPrice = price
   const before = position.quantity
@@ -314,10 +316,10 @@ function applyPositionFill(account, symbol, side, quantity, price) {
   return { openedQuantity: Math.max(0, quantity - closedQuantity), realizedPnl: pnl }
 }
 
-function createProtectionOrders(account, parent, quantity, barIndex, timestamp) {
+function createProtectionOrders(account: PaperAccount, parent: PaperOrder, quantity: number, barIndex: number, timestamp: number) {
   const side = parent.side === 'buy' ? 'sell' : 'buy'
   const ocoGroup = `bracket-${parent.id}`
-  const common = {
+  const common: Omit<PaperOrder, 'id' | 'type' | 'role' | 'price'> = {
     symbol: parent.symbol,
     side,
     quantity,
@@ -340,7 +342,7 @@ function createProtectionOrders(account, parent, quantity, barIndex, timestamp) 
   })
 }
 
-function finishOrder(account, order, status, timestamp) {
+function finishOrder(account: PaperAccount, order: PaperOrder, status: PaperOrder['status'], timestamp: number) {
   account.orders = account.orders.filter((item) => item !== order)
   order.status = status
   order.closedAt = timestamp

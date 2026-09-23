@@ -1,6 +1,6 @@
 import { Router } from 'express'
-import { paperRouter } from './paper-store.js'
-import { tradingViewRouter } from './tradingview.js'
+import { paperRouter } from './paper-store.ts'
+import { tradingViewRouter } from './tradingview.ts'
 
 export const apiRouter = Router()
 

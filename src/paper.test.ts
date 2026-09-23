@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import type { PaperAccount, PaperFillTrade, PaperOrder } from './types.ts'
 import {
   cancelPaperOrder,
   closePaperPosition,
@@ -12,7 +13,7 @@ import {
   normalizePaperAccount,
   pagePaperHistory,
   resetPaperAccount,
-} from './paper.js'
+} from './paper.ts'
 
 assert.equal(projectedPnl('buy', 2, 100, 110), 20)
 assert.equal(projectedPnl('buy', 2, 100, 90), -20)
@@ -51,7 +52,7 @@ placePaperOrder(account, {
 assert.equal(paperPosition(account, 'BINANCE:BTCUSDT').quantity, -1)
 assert.equal(paperPosition(account, 'BINANCE:BTCUSDT').averagePrice, 95)
 assert.equal(account.realizedPnl, 20)
-assert.equal(account.trades[0].realizedPnl, 10)
+assert.equal((account.trades[0] as PaperFillTrade).realizedPnl, 10)
 assert.equal(paperSummary(account, 90, 'BINANCE:BTCUSDT').unrealizedPnl, 5)
 
 const pending = placePaperOrder(account, {
@@ -86,12 +87,12 @@ assert.equal(account.orderHistory[0].status, 'cancelled')
 
 const legacy = createPaperAccount()
 legacy.position = { quantity: 1, averagePrice: 100 }
-delete legacy.nextGroupId
+delete (legacy as Partial<PaperAccount>).nextGroupId
 legacy.orders = [
   { id: 3, parentId: 2, symbol: 'BINANCE:BTCUSDT', reduceOnly: true },
   { id: 4, parentId: 2, symbol: 'BINANCE:BTCUSDT', reduceOnly: true },
   { id: 5, parentId: null, symbol: 'BINANCE:BTCUSDT' },
-]
+] as PaperOrder[]
 normalizePaperAccount(legacy)
 assert.deepEqual(legacy.orders.map(({ groupId }) => groupId), [1, 1, 2])
 assert.equal(legacy.orders.every(({ activeAt }) => Number.isFinite(activeAt)), true)
@@ -126,7 +127,7 @@ const offlineFills = processPaperBars(offline, [
 assert.equal(offlineFills.length, 1)
 assert.equal(offlineFills[0].role, 'stop-loss')
 assert.equal(paperPosition(offline, 'BINANCE:BTCUSDT').quantity, 0)
-assert.equal(offline.trades[0].price, 90)
+assert.equal((offline.trades[0] as PaperFillTrade).price, 90)
 
 const history = Array.from({ length: 12 }, (_, index) => ({
   id: index + 1,
