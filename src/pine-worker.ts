@@ -1,20 +1,20 @@
-import { calculatePine, preparePine } from './pine'
-import type { PineProgram } from './pine'
+import { calculatePine } from './pine'
 import type { KLineData } from 'klinecharts'
 
-type Request = { id: number; action: 'prepare'; source: string; timeframe: string } | { id: number; action: 'calculate'; bars: KLineData[] }
-let program: PineProgram | null = null
+type Request = { id: number; action: 'prepare' | 'calculate'; source?: string; timeframe: string; symbol: string; bars: KLineData[]; priceScale: number }
+let source: string | null = null
 
-self.onmessage = (event: MessageEvent<Request>) => {
+self.onmessage = async (event: MessageEvent<Request>) => {
   const request = event.data
   try {
     if (request.action === 'prepare') {
-      const next = preparePine(request.source, request.timeframe)
-      program = next
-      self.postMessage({ id: request.id, value: { plots: next.plots, overlay: next.overlay } })
+      if (!request.source) throw new Error('请输入 Pine Script')
+      const result = await calculatePine(request.source, request.bars, request.timeframe, request.symbol, request.priceScale)
+      source = request.source
+      self.postMessage({ id: request.id, value: result })
     } else {
-      if (!program) throw new Error('Pine Script 尚未编译')
-      self.postMessage({ id: request.id, value: calculatePine(program, request.bars) })
+      if (!source) throw new Error('Pine Script 尚未编译')
+      self.postMessage({ id: request.id, value: await calculatePine(source, request.bars, request.timeframe, request.symbol, request.priceScale) })
     }
   } catch (error) {
     self.postMessage({ id: request.id, error: error instanceof Error ? error.message : String(error) })

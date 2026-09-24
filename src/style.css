@@ -16,7 +16,9 @@ button:disabled { cursor: not-allowed; opacity: .38; }
 .tv-toolbar { height: 48px; display: flex; align-items: center; justify-content: space-between; padding: 0 12px; border-bottom: 1px solid #2a2e39; background: #131722; white-space: nowrap; }
 .toolbar-left { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; height: 100%; gap: 8px; }
 .app-logo { flex: 0 0 30px; width: 30px; height: 30px; object-fit: contain; }
-.toolbar-right { flex: 0 0 auto; margin-left: 12px; }
+.toolbar-right { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; margin-left: 12px; }
+.source-link { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 34px; color: #959daa; }
+.source-link:hover, .source-link:focus-visible { color: #f0f3fa; }
 .paper-toggle { height: 34px; padding: 0 14px; border: 1px solid #434651; border-radius: 5px; color: #131722; background: #f0f3fa; font-size: 13px; font-weight: 600; }
 .paper-toggle:hover { background: #d1d4dc; }
 .paper-toggle.active { color: #f0f3fa; border-color: #2962ff; background: #2962ff; }
@@ -52,7 +54,8 @@ button:disabled { cursor: not-allowed; opacity: .38; }
 .timeframe-favorite:hover { color: #f0b90b; }
 .indicator-control { position: relative; }
 .indicator-menu { position: absolute; top: 40px; left: 0; z-index: 60; width: 164px; padding: 4px; border: 1px solid #363a45; border-radius: 6px; background: #1e222d; box-shadow: 0 8px 24px rgba(0, 0, 0, .48); }
-.indicator-menu button { display: block; width: 100%; min-height: 34px; padding: 0 10px; border: 0; border-radius: 3px; color: #d1d4dc; background: transparent; text-align: left; font-size: 13px; }
+.indicator-menu--scripts { width: 240px; max-height: min(360px, 65vh); overflow-y: auto; }
+.indicator-menu button { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 34px; padding: 0 10px; border: 0; border-radius: 3px; color: #d1d4dc; background: transparent; text-align: left; font-size: 13px; overflow-wrap: anywhere; }
 .indicator-menu button:hover, .indicator-menu button:focus-visible { background: #2a2e39; }
 
 .tv-main { position: relative; display: flex; width: 100%; height: calc(100% - 48px); min-height: 0; }
@@ -245,20 +248,6 @@ button:disabled { cursor: not-allowed; opacity: .38; }
 .order-status.cancelled { color: #9298a5; }
 .paper-empty { display: grid; height: 100%; place-items: center; color: #787d8a; font-size: 12px; }
 .symbol-dialog { position: absolute; inset: 0; z-index: 50; display: flex; align-items: flex-start; justify-content: center; padding: clamp(64px, 10vh, 112px) 16px 16px; background: rgba(0, 0, 0, .58); }
-.pine-dialog { position: absolute; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(0, 0, 0, .62); }
-.pine-modal { display: flex; flex-direction: column; width: min(680px, 100%); height: min(600px, calc(100dvh - 32px)); min-height: 280px; border: 1px solid #363a45; border-radius: 6px; background: #1f222b; box-shadow: 0 16px 48px rgba(0, 0, 0, .6); }
-.pine-modal header, .pine-modal footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; }
-.pine-modal header { border-bottom: 1px solid #363a45; color: #f0f3fa; font-size: 16px; }
-.pine-modal header button { width: 30px; height: 30px; border: 0; border-radius: 4px; color: #b2b5be; background: transparent; font-size: 24px; }
-.pine-modal header button:hover { background: #2a2e39; }
-.pine-modal textarea { flex: 1 1 auto; min-height: 0; margin: 12px 16px 0; padding: 12px; resize: none; border: 1px solid #434651; border-radius: 4px; outline: none; color: #d1d4dc; background: #131722; font: 13px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
-.pine-modal textarea:focus { border-color: #6c8aff; }
-.pine-error { max-height: 80px; overflow: auto; padding: 8px 16px 0; color: #f23645; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.pine-modal footer { justify-content: flex-end; }
-.pine-modal footer button { min-height: 32px; padding: 0 12px; border: 1px solid #434651; border-radius: 4px; color: #d1d4dc; background: transparent; font-size: 13px; }
-.pine-modal footer .pine-apply { color: #fff; border-color: #2962ff; background: #2962ff; }
-.pine-modal footer .pine-remove { margin-right: auto; }
-.pine-modal footer button:hover:not(:disabled) { filter: brightness(1.18); }
 .symbol-dialog[hidden] { display: none; }
 .symbol-modal { width: min(840px, 100%); height: min(680px, calc(100vh - 84px)); border: 1px solid #363a45; border-radius: 6px; overflow: hidden; background: #1f1f1f; box-shadow: 0 16px 48px rgba(0, 0, 0, .6); }
 .symbol-dialog-heading { display: flex; align-items: center; justify-content: space-between; height: 62px; padding: 0 16px 0 20px; color: #dbdbdb; font-size: 20px; font-weight: 600; line-height: 28px; }

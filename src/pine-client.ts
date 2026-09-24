@@ -1,4 +1,4 @@
-import type { PinePlot, PineRow } from './pine'
+import type { PineResult } from './pine'
 import type { KLineData } from 'klinecharts'
 
 export class PineClient {
@@ -18,12 +18,12 @@ export class PineClient {
     this.worker.onerror = (event) => { this.dispose(new Error(event.message || 'Pine Worker 加载失败')) }
   }
 
-  prepare(source: string, timeframe: string) {
-    return this.request<{ plots: PinePlot[]; overlay: boolean }>({ action: 'prepare', source, timeframe })
+  prepare(source: string, timeframe: string, symbol: string, bars: KLineData[], priceScale: number) {
+    return this.request<PineResult>({ action: 'prepare', source, timeframe, symbol, bars, priceScale })
   }
 
-  calculate(bars: KLineData[]) {
-    return this.request<PineRow[]>({ action: 'calculate', bars })
+  calculate(bars: KLineData[], timeframe: string, symbol: string, priceScale: number) {
+    return this.request<PineResult>({ action: 'calculate', bars, timeframe, symbol, priceScale })
   }
 
   private request<T>(message: object): Promise<T> {

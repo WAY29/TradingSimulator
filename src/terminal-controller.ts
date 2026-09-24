@@ -1,8 +1,10 @@
 import { KLineChartPro } from '@klinecharts/pro'
 import type { Datafeed, DatafeedSubscribeCallback, SymbolInfo } from '@klinecharts/pro'
 import { ActionType, dispose as disposeKLineChart, init as getKLineChart, registerIndicator } from 'klinecharts'
-import type { Chart, Coordinate, KLineData, Point } from 'klinecharts'
+import type { Chart, Coordinate, Indicator, KLineData, Point } from 'klinecharts'
 import { PineClient } from './pine-client'
+import { drawPine, pineLegend, pineSubPrecision } from './pine-renderer'
+import type { PineResult } from './pine'
 import {
   cancelPaperOrder,
   closePaperPosition,
@@ -111,8 +113,14 @@ let toastTimer: number | null = null
 let persistErrorShown = false
 let startupGeneration = 0
 let pineClient: PineClient | null = null
-let pinePane: string | null = null
+let pinePanes: string[] = []
+let pineResult: PineResult | null = null
 let pineGeneration = 0
+let togglePineEditor: (() => void) | null = null
+
+export function setPineEditorToggle(callback: (() => void) | null) {
+  togglePineEditor = callback
+}
 
 export function subscribe(listener: () => void) {
   listeners.add(listener)
@@ -378,12 +386,26 @@ function bindChartInteractions() {
     return
   }
   const core = coreChart
+  const { icons, text } = core.getStyles().indicator.tooltip
+  const openEye = icons.find(({ id }) => id === 'visible')?.icon
+  const closedEye = icons.find(({ id }) => id === 'invisible')?.icon
+  core.setStyles({ indicator: { tooltip: { icons: icons.map((icon) => ({
+    ...icon,
+    marginTop: text.marginTop + (text.size - icon.size) / 2,
+    icon: icon.id === 'visible' ? closedEye ?? icon.icon :
+      icon.id === 'invisible' ? openEye ?? icon.icon : icon.icon,
+  })) } } })
   core.subscribeAction(ActionType.OnCrosshairChange, (data) => {
     if (state.mode !== 'select') return
     const timestamp = actionTimestamp(data)
     if (!timestamp) return
     state.selectionTimestamp = timestamp
     positionReplaySelector(timestamp)
+  })
+  core.subscribeAction(ActionType.OnTooltipIconClick, (data: { indicatorName?: string; iconId?: string } | undefined) => {
+    if (data?.indicatorName !== 'PINE_SCRIPT') return
+    if (data.iconId === 'pine-editor') togglePineEditor?.()
+    if (data.iconId === 'pine-remove') clearPineScript()
   })
   ;[ActionType.OnZoom, ActionType.OnScroll, ActionType.OnVisibleRangeChange, ActionType.OnPaneDrag]
     .forEach((type) => core.subscribeAction(type, syncTradeLayerPosition))
@@ -412,8 +434,9 @@ const PINE_COLORS = ['#38bdf8', '#f0b90b', '#22ab94', '#e879f9', '#ef5350', '#a3
 registerIndicator({ name: 'PINE_SCRIPT', calc: () => [] })
 
 function removePineIndicator() {
-  if (pinePane) coreChart?.removeIndicator(pinePane, 'PINE_SCRIPT')
-  pinePane = null
+  pinePanes.forEach((pane) => coreChart?.removeIndicator(pane, 'PINE_SCRIPT'))
+  pinePanes = []
+  pineResult = null
   pineClient?.dispose()
   pineClient = null
 }
@@ -438,54 +461,104 @@ export async function applyPineScript(source: string) {
   const generation = ++pineGeneration
   const client = new PineClient()
   try {
-    const prepared = await client.prepare(source, state.timeframe)
-    if (coreChart !== core || generation !== pineGeneration) throw new Error('图表已切换')
     const visibleBars = core.getDataList()
-    await client.calculate(state.mode === 'replay'
-      ? visibleBars.filter((bar) => bar.timestamp <= (currentBar()?.timestamp ?? 0)) : visibleBars)
-    if (coreChart !== core || generation !== pineGeneration) throw new Error('图表已切换')
+    const symbol = state.symbol.id
+    const timeframe = state.timeframe
+    const mode = state.mode
+    const scale = state.currentQuote?.priceScale ?? 10 ** priceDigits(visibleBars.at(-1)?.close ?? 0)
+    const prepared = await client.prepare(source, timeframe, symbol, mode === 'replay'
+      ? visibleBars.filter((bar) => bar.timestamp <= (currentBar()?.timestamp ?? 0)) : visibleBars, scale)
+    if (coreChart !== core || generation !== pineGeneration || state.symbol.id !== symbol || state.timeframe !== timeframe || state.mode !== mode) throw new Error('图表已切换')
+    if (state.mode === 'replay' && (core.getDataList().at(-1)?.timestamp ?? 0) > (currentBar()?.timestamp ?? 0)) {
+      throw new Error('回放图表尚未加载')
+    }
     removePineIndicator()
     pineClient = client
-    const pane = core.createIndicator({
-      name: 'PINE_SCRIPT', shortName: 'Pine', precision: prepared.overlay
-        ? priceDigits(state.bars.at(-1)?.close ?? 0, state.currentQuote?.priceScale) : 4,
-      figures: prepared.plots.map((plot, index) => ({
-        key: `p${index}`, title: `${plot.title}: `, type: plot.style === 'line' ? 'line' : 'bar', baseValue: plot.baseValue,
-        styles: (data) => ({
+    pineResult = prepared
+    const figures = (main: boolean) => prepared.plots.flatMap((plot, index) =>
+      main === plot.overlay ? [{
+        key: `p${index}`, title: `${plot.title}: `, type: plot.style === 'circles' ? 'circle' :
+          ['histogram', 'columns'].includes(plot.style) ? 'bar' : 'line', baseValue: plot.baseValue,
+        styles: (data: { current: { indicatorData?: Record<string, number | string> } }) => ({
           color: typeof data.current.indicatorData?.[`c${index}`] === 'string'
-            ? data.current.indicatorData[`c${index}`] as string : plot.color || PINE_COLORS[index],
+            ? data.current.indicatorData[`c${index}`] as string : plot.color || PINE_COLORS[index % PINE_COLORS.length],
           size: plot.linewidth,
         }),
-      })),
-      calc: async (dataList: KLineData[]) => {
-        if (state.mode === 'replay' && (dataList.at(-1)?.timestamp ?? 0) > (currentBar()?.timestamp ?? 0)) {
-          return dataList.map(() => ({}))
+      }] : [])
+    const calc = async (dataList: KLineData[]) => {
+      if (state.mode === 'replay' && (dataList.at(-1)?.timestamp ?? 0) > (currentBar()?.timestamp ?? 0)) {
+        return dataList.map(() => ({}))
+      }
+      const length = dataList.length
+      const symbol = state.symbol.id
+      const timeframe = state.timeframe
+      const firstTimestamp = dataList[0]?.timestamp
+      const firstClose = dataList[0]?.close
+      const lastTimestamp = dataList.at(-1)?.timestamp
+      const lastClose = dataList.at(-1)?.close
+      try {
+        const scale = state.currentQuote?.priceScale ?? 10 ** priceDigits(dataList.at(-1)?.close ?? 0)
+        const result = await client.calculate(dataList, timeframe, symbol, scale)
+        const current = core.getDataList()
+        if (pineClient !== client || state.symbol.id !== symbol || state.timeframe !== timeframe ||
+          current.length !== length || current[0]?.timestamp !== firstTimestamp ||
+          current[0]?.close !== firstClose || current.at(-1)?.timestamp !== lastTimestamp || current.at(-1)?.close !== lastClose) {
+          return current.map(() => ({}))
         }
-        const length = dataList.length
-        const firstTimestamp = dataList[0]?.timestamp
-        const firstClose = dataList[0]?.close
-        const lastTimestamp = dataList.at(-1)?.timestamp
-        const lastClose = dataList.at(-1)?.close
-        try {
-          const rows = await client.calculate(dataList)
-          const current = core.getDataList()
-          if (pineClient !== client || current.length !== length || current[0]?.timestamp !== firstTimestamp ||
-            current[0]?.close !== firstClose || current.at(-1)?.timestamp !== lastTimestamp || current.at(-1)?.close !== lastClose) {
-            return current.map(() => ({}))
-          }
-          return rows
-        } catch (error) {
-          if (pineClient === client) window.setTimeout(() => {
-            if (pineClient !== client) return
-            clearPineScript()
-            showToast(`Pine Script: ${error instanceof Error ? error.message : String(error)}`)
+        pineResult = result
+        const subPane = pinePanes.find((pane) => pane !== 'candle_pane')
+        const precision = pineSubPrecision(result)
+        if (subPane && (core.getIndicatorByPaneId(subPane, 'PINE_SCRIPT') as Indicator | null)?.precision !== precision) {
+          window.setTimeout(() => {
+            if (pineClient === client && coreChart === core && state.symbol.id === symbol && state.timeframe === timeframe &&
+              (core.getIndicatorByPaneId(subPane, 'PINE_SCRIPT') as Indicator | null)?.precision !== precision) {
+              core.overrideIndicator({ name: 'PINE_SCRIPT', precision }, subPane)
+            }
           }, 0)
-          return core.getDataList().map(() => ({}))
+        }
+        return result.rows
+      } catch (error) {
+        if (pineClient === client) window.setTimeout(() => {
+          if (pineClient !== client) return
+          clearPineScript()
+          showToast(`Pine Script: ${error instanceof Error ? error.message : String(error)}`)
+        }, 0)
+        return core.getDataList().map(() => ({}))
+      }
+    }
+    const create = (main: boolean) => core.createIndicator({
+      name: 'PINE_SCRIPT', shortName: prepared.name, precision: main
+        ? priceDigits(state.bars.at(-1)?.close ?? 0, state.currentQuote?.priceScale) : pineSubPrecision(prepared),
+      figures: figures(main),
+      createTooltipDataSource: ({ indicator, defaultStyles, bounding, crosshair }) => {
+        const defaults = defaultStyles.tooltip.icons
+        const eye = defaults.find(({ id }) => id === (indicator.visible ? 'invisible' : 'visible'))
+        const settings = defaults.find(({ id }) => id === 'setting')
+        const close = defaults.find(({ id }) => id === 'close')
+        const limit = Math.max(4, Math.floor((bounding.width - 115) / 14))
+        const letters = Array.from(prepared.name)
+        return {
+          name: letters.length > limit ? `${letters.slice(0, limit).join('')}…` : prepared.name,
+          icons: [eye, settings && { ...settings, id: 'pine-editor' }, close && { ...close, id: 'pine-remove' }]
+            .filter((icon) => icon != null),
+          calcParamsText: '',
+          values: pineLegend(prepared, indicator.result, main, crosshair.dataIndex ?? indicator.result.length - 1, indicator.precision),
         }
       },
-    }, true, prepared.overlay ? { id: 'candle_pane' } : undefined)
-    pinePane = prepared.overlay ? 'candle_pane' : pane
-    if (!pinePane || !core.getIndicatorByPaneId(pinePane, 'PINE_SCRIPT')) throw new Error('无法创建指标图层')
+      draw: (params) => drawPine(params, pineResult, main),
+      calc,
+    }, true, main ? { id: 'candle_pane' } : undefined)
+    const main = prepared.overlay || prepared.plots.some((plot) => plot.overlay)
+    if (!prepared.overlay) {
+      const subPane = create(false)
+      if (!subPane || !core.getIndicatorByPaneId(subPane, 'PINE_SCRIPT')) throw new Error('无法创建副图指标')
+      pinePanes.push(subPane)
+    }
+    if (main) {
+      create(true)
+      if (!core.getIndicatorByPaneId('candle_pane', 'PINE_SCRIPT')) throw new Error('无法创建主图指标')
+      pinePanes.push('candle_pane')
+    }
     state.pineSource = source
     notify()
   } catch (error) {
@@ -782,8 +855,8 @@ function applyQuote(quote: Quote) {
   }
   const previousScale = state.currentQuote?.priceScale
   state.currentQuote = quote
-  if (pinePane === 'candle_pane' && previousScale !== quote.priceScale) {
-    coreChart?.overrideIndicator({ name: 'PINE_SCRIPT', precision: priceDigits(quote.price, quote.priceScale) }, pinePane)
+  if (pinePanes.includes('candle_pane') && previousScale !== quote.priceScale) {
+    coreChart?.overrideIndicator({ name: 'PINE_SCRIPT', precision: priceDigits(quote.price, quote.priceScale) }, 'candle_pane')
   }
   let bar = state.bars[state.liveHead]
   if (!bar) { notify(); return }
@@ -841,8 +914,8 @@ async function switchSymbol(item: MarketSymbol) {
       core.clearData()
       chart.setSymbol(chartSymbol(state.symbol))
       core.applyNewData(chartWindowData(), true)
-      if (pinePane === 'candle_pane') {
-        core.overrideIndicator({ name: 'PINE_SCRIPT', precision: priceDigits(state.bars.at(-1)?.close ?? 0) }, pinePane)
+      if (pinePanes.includes('candle_pane')) {
+        core.overrideIndicator({ name: 'PINE_SCRIPT', precision: priceDigits(state.bars.at(-1)?.close ?? 0) }, 'candle_pane')
       }
       window.requestAnimationFrame(() => {
         if (coreChart !== core) return

@@ -23,3 +23,7 @@ npm run dev
 - SQLite 持久化的账户、订单、成交历史和 Replay 会话
 
 本地 Express 服务负责 TradingView WebSocket、历史数据、品种搜索、SSE 行情推送和模拟交易状态。SQLite 文件位于 `.data/trading-simulator.sqlite`，不会提交到 Git。当前使用公开图表数据，不需要账户凭据；回放数据会丢弃最后一根未收线 K 线。真实交易接口不在本项目范围内。
+
+## 授权
+
+项目自有源码依据 [GNU AGPL-3.0-only](./LICENSE) 授权。源码及构建方式见 [GitHub 仓库](https://github.com/WAY29/TradingSimulator)；部署或分发时须提供与运行版本一致的对应源码。Pine Script 运行时使用 LuxAlgo 的 [PineTS](https://github.com/LuxAlgo/PineTS)，同为 AGPL-3.0-only；其他第三方依赖保留各自许可证。TradingView 的行情数据、商标和远端图标不在本项目授权范围内。

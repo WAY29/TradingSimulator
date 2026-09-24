@@ -1,0 +1,43 @@
+.terminal.pine-open .tv-main { width: 50%; }
+.terminal.pine-open .watchlist-panel { display: none; }
+.terminal.pine-open .trade-layer, .terminal.pine-open .replay-future-mask { right: 0; }
+.terminal.pine-open .replay-dock, .terminal.pine-open .paper-panel { right: 50%; }
+.terminal.pine-open .replay-watermark { left: 50%; }
+.pine-editor { position: absolute; top: 48px; right: 0; bottom: 0; z-index: 80; display: flex; flex-direction: column; width: 50%; min-width: 0; border-left: 1px solid #353942; background: #0b0c0f; color: #d9dce2; }
+.pine-editor__header { display: flex; align-items: center; justify-content: space-between; flex: 0 0 54px; padding: 0 14px 0 20px; border-bottom: 1px solid #262931; background: #14161b; }
+.pine-editor__header strong { font-size: 15px; font-weight: 600; }
+.pine-editor__toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: 0 0 58px; padding: 0 12px 0 18px; border-bottom: 1px solid #30343b; }
+.pine-editor__menu-area { position: relative; min-width: 0; }
+.pine-editor__title { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 260px; padding: 6px 8px; border: 0; border-radius: 4px; color: #f0f2f7; background: transparent; font-size: 17px; font-weight: 600; }
+.pine-editor__title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pine-editor__title:hover, .pine-editor__icon:hover { background: #262931; }
+.pine-editor__actions { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+.pine-editor__icon { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 4px; color: #b8bfcc; background: transparent; }
+.pine-editor__run { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 34px; padding: 0 12px; border: 1px solid #3b64cb; border-radius: 4px; color: #fff; background: #244eaa; white-space: nowrap; font-size: 12px; }
+.pine-editor__run:hover:not(:disabled) { background: #3267ce; }
+.pine-editor__run:disabled { opacity: .55; }
+.pine-editor__menu { position: absolute; top: calc(100% + 8px); left: 0; z-index: 100; display: flex; flex-direction: column; width: min(280px, calc(100vw - 24px)); max-height: min(340px, 60vh); padding: 5px; overflow-y: auto; border: 1px solid #3a3e47; border-radius: 5px; background: #1b1e25; box-shadow: 0 12px 30px #0008; }
+.pine-editor__menu--right { right: 0; left: auto; }
+.pine-editor__menu label { display: grid; gap: 6px; padding: 8px; color: #9299a7; font-size: 11px; }
+.pine-editor__menu input { width: 100%; height: 30px; padding: 0 8px; border: 1px solid #444954; border-radius: 3px; outline: none; color: #edf0f5; background: #101216; font-size: 13px; }
+.pine-editor__menu button { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 5px 9px; border: 0; border-radius: 3px; color: #d9dce2; background: transparent; text-align: left; font-size: 12px; overflow-wrap: anywhere; }
+.pine-editor__menu button:hover { background: #303b55; }
+.pine-editor__code { flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.pine-editor__code .cm-editor { height: 100%; }
+.pine-editor__code .cm-editor.cm-focused { outline: none; }
+.pine-editor__code .cm-minimap-gutter { background: #0d1014; border-left: 1px solid #20252c; }
+.pine-editor__status { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: 0 0 auto; min-height: 29px; padding: 5px 14px; border-top: 1px solid #2d313a; color: #818995; font-size: 11px; }
+.pine-editor__error { max-height: 84px; overflow: auto; color: #ff757d; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 820px) {
+  .terminal.pine-open .tv-main { width: 100%; }
+  .pine-editor { width: 100%; }
+  .pine-editor__code .cm-minimap-gutter { display: none; }
+}
+@media (max-width: 440px) {
+  .pine-editor__header { flex-basis: 46px; }
+  .pine-editor__toolbar { flex-basis: 52px; padding: 0 7px; }
+  .pine-editor__title { max-width: 112px; font-size: 14px; }
+  .pine-editor__actions { gap: 1px; }
+  .pine-editor__icon { width: 30px; }
+  .pine-editor__run { padding: 0 7px; gap: 4px; }
+}
