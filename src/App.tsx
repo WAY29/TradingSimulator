@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { ChevronLeft, CodeXml, FilePlus2 } from 'lucide-react'
+import { Check, ChevronDown, ChevronLeft, CodeXml, Copy, FilePlus2, LayoutTemplate, Pencil, Plus, Save, Trash2, X } from 'lucide-react'
 import { TIMEFRAMES } from './config'
 import { activeOrderNumbers, projectedPnl, type PaperHistoryTrade } from './paper'
 import { savedPineScripts, selectPineScript, type SavedPineScript } from './pine-scripts'
@@ -35,6 +35,7 @@ function TerminalShell() {
   }, [])
 
   const controllerState = controller?.getControllerState()
+  const activeLayoutId = controller?.getChartLayouts().activeId
   const modeClass = controllerState?.mode && controllerState.mode !== 'live' ? 'replay-open' : ''
   const paperClass = controllerState?.paperPanelOpen ? 'paper-open' : ''
 
@@ -76,9 +77,23 @@ function TerminalShell() {
 
   useEffect(() => {
     if (!controller) return
+    const save = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's' || event.defaultPrevented) return
+      if (event.target instanceof Element && event.target.closest('.pine-editor')) return
+      event.preventDefault()
+      if (!document.querySelector('.confirm-dialog[open]')) controller.saveChartLayout()
+    }
+    document.addEventListener('keydown', save)
+    return () => document.removeEventListener('keydown', save)
+  }, [controller])
+
+  useEffect(() => {
+    if (!controller) return
     controller.setPineEditorToggle(() => setPineOpen((open) => !open))
     return () => controller.setPineEditorToggle(null)
   }, [controller])
+
+  useEffect(() => setPineOpen(false), [activeLayoutId])
 
   const openPineScript = (script: SavedPineScript | null) => {
     selectPineScript(script)
@@ -115,6 +130,7 @@ function Toolbar({ controller, onPine }: { controller: TerminalController | null
   const currentTimeframe = TIMEFRAMES.find(({ id }) => id === state?.timeframe)
   const favoriteTimeframes: string[] = state?.favoriteTimeframes || []
   const quote = state?.currentQuote
+  const layouts = controller?.getChartLayouts()
 
   return (
     <header className="tv-toolbar">
@@ -158,9 +174,56 @@ function Toolbar({ controller, onPine }: { controller: TerminalController | null
         </div>
         <button className="toolbar-button replay-toggle" id="replay-toggle" title="Bar Replay" onClick={() => controller?.toggleReplay()}>◁<span className="mobile-hide">&nbsp; Replay</span></button>
       </div>
-      <div className="toolbar-right"><a className="source-link" href="https://github.com/WAY29/TradingSimulator" target="_blank" rel="noopener noreferrer" title="项目源码与 AGPL 许可证" aria-label="项目源码与 AGPL 许可证"><CodeXml size={17} /></a><button className="paper-toggle" id="paper-toggle" title="模拟交易" onClick={() => controller?.setPaperPanelOpen(!state?.paperPanelOpen)}>模拟交易</button></div>
+      <div className="toolbar-right"><button className="toolbar-button chart-save" title="保存图表 (Ctrl+S)" aria-label="保存图表" disabled={!controller || state?.loading} onClick={() => controller?.saveChartLayout()}><Save size={17} /></button><ChartLayoutMenu controller={controller} layouts={layouts} /><a className="source-link" href="https://github.com/WAY29/TradingSimulator" target="_blank" rel="noopener noreferrer" title="项目源码与 AGPL 许可证" aria-label="项目源码与 AGPL 许可证"><CodeXml size={17} /></a><button className="paper-toggle" id="paper-toggle" title="模拟交易" onClick={() => controller?.setPaperPanelOpen(!state?.paperPanelOpen)}>模拟交易</button></div>
     </header>
   )
+}
+
+function ChartLayoutMenu({ controller, layouts }: { controller: TerminalController | null; layouts?: ReturnType<TerminalController['getChartLayouts']> }) {
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<{ id: string; name: string } | null>(null)
+  const [name, setName] = useState('')
+  const busy = controller?.getControllerState().loading ?? false
+  const menu = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const dismiss = (event: MouseEvent) => { if (!menu.current?.contains(event.target as Node)) { setOpen(false); setEditing(null) } }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { setOpen(false); setEditing(null) } }
+    document.addEventListener('click', dismiss)
+    document.addEventListener('keydown', escape)
+    return () => { document.removeEventListener('click', dismiss); document.removeEventListener('keydown', escape) }
+  }, [open])
+  const active = layouts?.items.find(({ id }) => id === layouts.activeId)
+  const close = () => { setOpen(false); setEditing(null) }
+  return <div className="chart-layout-control" ref={menu}>
+    <button id="chart-layout-toggle" className="toolbar-button chart-layout-toggle" title="切换图表" aria-expanded={open} onClick={() => { setOpen(!open); setEditing(null) }}><LayoutTemplate size={17} /><span>{active?.name || '图表 1'}</span><ChevronDown size={15} /></button>
+    {open && <div className="chart-layout-menu" role="group" aria-label="图表配置" onClick={(event) => event.stopPropagation()}>
+      <div className="chart-layout-menu-header"><strong>图表</strong><button title="新建图表" aria-label="新建图表" disabled={busy} onClick={() => { controller?.createChartLayout(); close() }}><Plus size={17} /></button></div>
+      <div className="chart-layout-list">{layouts?.items.map((layout) => <div className={`chart-layout-item ${layout.id === layouts.activeId ? 'active' : ''}`} key={layout.id}>
+        {editing === layout.id ? <form onSubmit={(event) => { event.preventDefault(); controller?.renameChartLayout(layout.id, name); setEditing(null) }}><input autoFocus aria-label="图表名称" maxLength={40} value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { event.stopPropagation(); setEditing(null) } }} /><button type="submit" title="保存名称" aria-label="保存名称"><Check size={15} /></button><button type="button" title="取消重命名" aria-label="取消重命名" onClick={() => setEditing(null)}><X size={15} /></button></form> : <>
+          <button className="chart-layout-pick" disabled={busy} aria-current={layout.id === layouts.activeId ? 'page' : undefined} onClick={() => { void controller?.selectChartLayout(layout.id); close() }}>{layout.id === layouts.activeId ? <Check size={15} /> : <span className="chart-layout-check" />}{layout.name}</button>
+          <div className="chart-layout-actions"><button title={`重命名 ${layout.name}`} aria-label={`重命名 ${layout.name}`} disabled={busy} onClick={() => { setName(layout.name); setEditing(layout.id) }}><Pencil size={14} /></button><button title={`复制 ${layout.name}`} aria-label={`复制 ${layout.name}`} disabled={busy} onClick={() => { controller?.duplicateChartLayout(layout.id); close() }}><Copy size={14} /></button><button title={`删除 ${layout.name}`} aria-label={`删除 ${layout.name}`} disabled={busy || layouts.items.length === 1} onClick={() => { setDeleting({ id: layout.id, name: layout.name }); close() }}><Trash2 size={14} /></button></div>
+        </>}
+      </div>)}</div>
+    </div>}
+    {deleting && <ConfirmDialog title={`删除图表“${deleting.name}”？`} message="该图表的指标、画线和视角将被删除。" action="删除图表" onConfirm={() => { void controller?.deleteChartLayout(deleting.id) }} onClose={() => { setDeleting(null); menu.current?.querySelector<HTMLButtonElement>('#chart-layout-toggle')?.focus() }} />}
+  </div>
+}
+
+function ConfirmDialog({ title, message, action, onConfirm, onClose }: { title: string; message: string; action: string; onConfirm: () => void; onClose: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    const element = dialog.current
+    element?.showModal()
+    element?.querySelector<HTMLButtonElement>('.confirm-cancel')?.focus()
+    return () => { if (element?.open) element.close() }
+  }, [])
+  return <dialog ref={dialog} className="confirm-dialog" aria-label={title} onClose={onClose} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dialog.current?.close() } }}>
+    <h2>{title}</h2>
+    <p>{message}</p>
+    <div className="confirm-actions"><button className="confirm-cancel" onClick={() => dialog.current?.close()}>取消</button><button className="confirm-danger" onClick={() => { onConfirm(); dialog.current?.close() }}>{action}</button></div>
+  </dialog>
 }
 
 function ChartWorkspace({ controller }: { controller: TerminalController | null }) {
@@ -168,7 +231,7 @@ function ChartWorkspace({ controller }: { controller: TerminalController | null 
   const context = state?.contextMenu
   return (
     <div className="tv-main">
-      <ChartHost controller={controller} />
+      <ChartHost key={controller?.getChartLayouts().activeId} controller={controller} />
       <div className="replay-watermark" id="replay-watermark" hidden={state?.mode !== 'replay'}><span>◀◀</span> Replay</div>
       <div className="replay-future-mask" id="replay-future-mask" hidden={state?.mode !== 'select'} style={{ left: state?.replaySelectorLeft ?? 0 }} />
       <div className="replay-selector-line" id="replay-selector-line" hidden={state?.mode !== 'select' || state?.replaySelectorLeft == null} style={{ left: state?.replaySelectorLeft ?? 0 }}><span>✂</span></div>
@@ -370,10 +433,11 @@ function PaperPanel({ controller }: { controller: TerminalController | null }) {
 }
 
 function PaperAccount({ data, controller }: { data: PanelData | undefined; controller: TerminalController | null }) {
+  const [confirming, setConfirming] = useState(false)
   if (!data) return <div className="paper-account" id="paper-account" />
   const summary = data.summary
   const fields: [string, number][] = [['账户余额', summary.balance], ['账户净值', summary.equity], ['已实现盈亏', summary.realizedPnl], ['未实现盈亏', summary.unrealizedPnl], ['可用资金', summary.availableFunds], ['委托占用', summary.ordersMargin]]
-  return <div className="paper-account" id="paper-account">{fields.map(([label, value], index) => <span key={label}><small>{label}{index === 0 ? <button className="balance-reset" onClick={() => controller?.resetAccount()} title="重置模拟账户" aria-label="重置模拟账户">↻</button> : null}</small><strong className={label.includes('盈亏') ? controller?.signClass(value) : ''}>{controller?.formatMoney(value)}</strong></span>)}</div>
+  return <><div className="paper-account" id="paper-account">{fields.map(([label, value], index) => <span key={label}><small>{label}{index === 0 ? <button className="balance-reset" onClick={() => setConfirming(true)} title="重置模拟账户" aria-label="重置模拟账户">↻</button> : null}</small><strong className={label.includes('盈亏') ? controller?.signClass(value) : ''}>{controller?.formatMoney(value)}</strong></span>)}</div>{confirming && <ConfirmDialog title="重置模拟账户至 $100,000？" message="所有持仓和挂单将被清空，历史记录会保留。" action="重置账户" onConfirm={() => controller?.resetAccount()} onClose={() => setConfirming(false)} />}</>
 }
 
 function positionHistoryFilter(details: HTMLDetailsElement) {

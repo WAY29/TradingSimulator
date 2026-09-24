@@ -57,6 +57,35 @@ button:disabled { cursor: not-allowed; opacity: .38; }
 .indicator-menu--scripts { width: 240px; max-height: min(360px, 65vh); overflow-y: auto; }
 .indicator-menu button { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 34px; padding: 0 10px; border: 0; border-radius: 3px; color: #d1d4dc; background: transparent; text-align: left; font-size: 13px; overflow-wrap: anywhere; }
 .indicator-menu button:hover, .indicator-menu button:focus-visible { background: #2a2e39; }
+.chart-layout-control { position: relative; }
+.chart-save { display: inline-flex; align-items: center; justify-content: center; color: #d1d4dc; }
+.chart-save:hover, .chart-save:focus-visible { color: #f0f3fa; background: #2a2e39; }
+.chart-layout-toggle { display: flex; align-items: center; gap: 7px; max-width: 190px; }
+.chart-layout-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chart-layout-menu { position: absolute; top: 40px; right: 0; z-index: 70; width: 292px; max-height: min(420px, 75vh); overflow: auto; padding: 5px; border: 1px solid #363a45; border-radius: 6px; background: #1e222d; box-shadow: 0 8px 24px rgba(0, 0, 0, .48); }
+.chart-layout-menu-header, .chart-layout-item, .chart-layout-item form { display: flex; align-items: center; }
+.chart-layout-menu-header { justify-content: space-between; padding: 3px 5px 5px 10px; border-bottom: 1px solid #363a45; color: #d1d4dc; font-size: 12px; }
+.chart-layout-menu button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; height: 28px; min-width: 28px; padding: 0 5px; border: 0; border-radius: 3px; color: #b2b5be; background: transparent; }
+.chart-layout-menu button:hover:not(:disabled), .chart-layout-menu button:focus-visible { color: #f0f3fa; background: #363a45; }
+.chart-layout-menu button:disabled { opacity: .35; cursor: not-allowed; }
+.chart-layout-list { padding-top: 4px; }
+.chart-layout-item { min-height: 34px; border-radius: 3px; }
+.chart-layout-item:hover, .chart-layout-item.active { background: #2a2e39; }
+.chart-layout-menu .chart-layout-pick { justify-content: flex-start; flex: 1 1 auto; min-width: 0; gap: 7px; padding-left: 7px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #d1d4dc; font-size: 13px; text-align: left; }
+.chart-layout-check { width: 15px; flex: 0 0 15px; }
+.chart-layout-actions { display: flex; flex: 0 0 auto; }
+.chart-layout-item form { flex: 1; min-width: 0; gap: 2px; padding-left: 7px; }
+.chart-layout-item input { flex: 1; min-width: 0; height: 27px; padding: 0 6px; border: 1px solid #6b7280; border-radius: 3px; color: #f0f3fa; background: #131722; outline: 0; font-size: 13px; }
+.confirm-dialog { width: min(400px, calc(100vw - 40px)); padding: 22px 24px 20px; border: 1px solid #525965; border-top: 3px solid #e0535f; border-radius: 6px; color: #f0f3fa; background: #20242d; box-shadow: 0 22px 64px rgba(0, 0, 0, .75); }
+.confirm-dialog::backdrop { background: rgba(5, 8, 14, .78); }
+.confirm-dialog h2 { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; }
+.confirm-dialog p { margin: 12px 0 24px; color: #b2b5be; font-size: 13px; line-height: 1.5; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.confirm-actions button { min-width: 84px; height: 36px; padding: 0 14px; border: 1px solid #505662; border-radius: 4px; color: #f0f3fa; background: #343945; font-size: 13px; font-weight: 600; }
+.confirm-actions button:hover { background: #454b57; }
+.confirm-actions .confirm-danger { border-color: #c83748; background: #c83748; }
+.confirm-actions .confirm-danger:hover { background: #ad2e3c; }
+.confirm-actions button:focus-visible { outline: 2px solid #f0f3fa; outline-offset: 2px; }
 
 .tv-main { position: relative; display: flex; width: 100%; height: calc(100% - 48px); min-height: 0; }
 .terminal.replay-open .tv-main { height: calc(100% - 90px); }

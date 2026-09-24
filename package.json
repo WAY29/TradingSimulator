@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "node --experimental-strip-types server.ts",
     "build": "vite build",
-    "test": "node --experimental-strip-types src/paper.test.ts && node --experimental-strip-types src/pine.test.ts",
+    "test": "node --experimental-strip-types src/paper.test.ts && node --experimental-strip-types src/pine.test.ts && node --experimental-strip-types src/chart-layouts.test.ts",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview"
   },

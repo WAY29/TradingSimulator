@@ -1,10 +1,12 @@
 import { KLineChartPro } from '@klinecharts/pro'
 import type { Datafeed, DatafeedSubscribeCallback, SymbolInfo } from '@klinecharts/pro'
-import { ActionType, dispose as disposeKLineChart, init as getKLineChart, registerIndicator } from 'klinecharts'
-import type { Chart, Coordinate, Indicator, KLineData, Point } from 'klinecharts'
+import { ActionType, dispose as disposeKLineChart, getSupportedIndicators, getSupportedOverlays, init as getKLineChart, registerIndicator } from 'klinecharts'
+import type { Chart, Coordinate, Indicator, KLineData, Overlay, Point } from 'klinecharts'
 import { PineClient } from './pine-client'
 import { drawPine, pineLegend, pineSubPrecision } from './pine-renderer'
 import type { PineResult } from './pine'
+import { newChartLayout, readChartLayouts, CHART_LAYOUTS_KEY } from './chart-layouts.ts'
+import type { ChartDrawing, ChartLayout, ChartView } from './chart-layouts.ts'
 import {
   cancelPaperOrder,
   closePaperPosition,
@@ -44,13 +46,37 @@ type CoreChart = Omit<Chart, 'convertToPixel' | 'convertFromPixel'> & {
   convertToPixel(point: Partial<Point>, finder: { paneId?: string; absolute?: boolean }): Partial<Coordinate>
   convertFromPixel(coordinate: Partial<Coordinate>, finder: { paneId?: string; absolute?: boolean }): Partial<Point>
 }
+type ChartAxis = {
+  getAutoCalcTickFlag(): boolean
+  setAutoCalcTickFlag(auto: boolean): void
+  getRange(): ChartView['ranges'][string]
+  setRange(range: ChartView['ranges'][string]): void
+}
+type ChartPane = {
+  getId(): string
+  getBounding(): { height: number }
+  getAxisComponent(): ChartAxis
+}
+type ChartInternals = CoreChart & {
+  getAllDrawPanes(): ChartPane[]
+  getChartStore(): {
+    getOverlayStore(): { getInstances(): Overlay[] }
+    getTimeScaleStore(): { getLastBarRightSideDiffBarCount(): number }
+  }
+  adjustPaneViewport(measureHeight: boolean, measureWidth: boolean, update: boolean, adjustAxis: boolean, forceAxis: boolean): void
+}
 type SavedState = { paper: Partial<PaperAccount>; session: ReplaySession }
 
 const listeners = new Set<() => void>()
+const chartLayouts = readChartLayouts(localStorage, loadSelectedMarket(), loadSelectedTimeframe())
+
+function activeChartLayout() {
+  return chartLayouts.items.find(({ id }) => id === chartLayouts.activeId)!
+}
 
 const state: ControllerState = {
-  symbol: loadSelectedMarket(),
-  timeframe: loadSelectedTimeframe(),
+  symbol: { ...activeChartLayout().symbol },
+  timeframe: activeChartLayout().timeframe,
   favoriteTimeframes: loadFavoriteTimeframes(),
   bars: [],
   mode: 'live',
@@ -89,7 +115,7 @@ const state: ControllerState = {
   marketDetails: null,
   speedMenuOpen: false,
   timeframeMenuOpen: false,
-  pineSource: '',
+  pineSource: activeChartLayout().pineSource,
   contextMenu: null,
   replaySelectorLeft: null,
 }
@@ -117,6 +143,11 @@ let pinePanes: string[] = []
 let pineResult: PineResult | null = null
 let pineGeneration = 0
 let togglePineEditor: (() => void) | null = null
+let chartLayoutSwitch = 0
+let chartLayoutReady = false
+let chartDefaultBarSpace = 8
+let chartLayoutSaveTimer: number | null = null
+let chartContextSerial = 0
 
 export function setPineEditorToggle(callback: (() => void) | null) {
   togglePineEditor = callback
@@ -131,7 +162,269 @@ export function getControllerState() {
   return state
 }
 
+export function getChartLayouts() {
+  return { activeId: chartLayouts.activeId, items: chartLayouts.items.map(({ id, name }) => ({ id, name })) }
+}
+
+function writeChartLayouts() {
+  try {
+    localStorage.setItem(CHART_LAYOUTS_KEY, JSON.stringify(chartLayouts))
+    return true
+  } catch {
+    showToast('图表配置保存失败，请检查浏览器存储空间')
+    return false
+  }
+}
+
+function paneForIndicator(core: CoreChart, name: string) {
+  return (core as ChartInternals).getAllDrawPanes().find((pane) => {
+    const indicators = core.getIndicatorByPaneId(pane.getId()) as Map<string, Indicator> | null
+    return indicators instanceof Map && indicators.has(name)
+  })
+}
+
+function paneKey(core: CoreChart, paneId: string) {
+  if (paneId === 'candle_pane') return paneId
+  const indicators = core.getIndicatorByPaneId(paneId) as Map<string, Indicator> | null
+  return indicators instanceof Map ? indicators.keys().next().value as string || paneId : paneId
+}
+
+function viewKey() {
+  return `${state.symbol.id}/${state.timeframe}`
+}
+
+function captureChartLayout() {
+  if (!chartLayoutReady || !coreChart || state.mode !== 'live' || !coreChart.getDataList().length) return false
+  const core = coreChart
+  const internals = core as ChartInternals
+  const layout = activeChartLayout()
+  const ranges: ChartView['ranges'] = {}
+  const paneHeights: NonNullable<ChartView['paneHeights']> = {}
+  layout.indicators = internals.getAllDrawPanes().flatMap((pane) => {
+    const paneId = pane.getId()
+    if (paneId === 'x_axis_pane') return []
+    if (paneId !== 'candle_pane') paneHeights[paneKey(core, paneId)] = pane.getBounding().height
+    const axis = pane.getAxisComponent()
+    if (!axis.getAutoCalcTickFlag()) ranges[paneKey(core, paneId)] = { ...axis.getRange() }
+    const indicators = core.getIndicatorByPaneId(paneId) as Map<string, Indicator> | null
+    if (!(indicators instanceof Map)) return []
+    return [...indicators.values()].filter(({ name }) => name !== 'PINE_SCRIPT').map((indicator) => ({
+      name: indicator.name, pane: paneId === 'candle_pane' ? paneId : indicator.name,
+      calcParams: indicator.calcParams, visible: indicator.visible, styles: indicator.styles,
+      series: indicator.series, height: paneId === 'candle_pane' ? undefined : pane.getBounding().height,
+    }))
+  })
+  const supported = new Set(getSupportedOverlays())
+  const presentPanes = new Set(internals.getAllDrawPanes().map((pane) => paneKey(core, pane.getId())))
+  layout.drawings = layout.drawings.filter(({ symbol, pane }) => symbol !== state.symbol.id || !presentPanes.has(pane)).concat(internals.getChartStore().getOverlayStore().getInstances()
+    .filter((overlay) => supported.has(overlay.name))
+    .map((overlay): ChartDrawing => ({
+      id: overlay.id, groupId: overlay.groupId, name: overlay.name,
+      symbol: state.symbol.id,
+      pane: paneKey(core, overlay.paneId), points: overlay.points.map((point) => ({ ...point })),
+      lock: overlay.lock, visible: overlay.visible, zLevel: overlay.zLevel, mode: overlay.mode,
+      styles: overlay.styles, extendData: overlay.extendData,
+    })))
+  layout.views[viewKey()] = {
+    barSpace: core.getBarSpace(),
+    rightBars: internals.getChartStore().getTimeScaleStore().getLastBarRightSideDiffBarCount(),
+    ranges,
+    paneHeights,
+  }
+  layout.pineSource = state.pineSource
+  return writeChartLayouts()
+}
+
+function queueChartLayoutSave() {
+  if (!chartLayoutReady || state.mode !== 'live') return
+  if (chartLayoutSaveTimer != null) window.clearTimeout(chartLayoutSaveTimer)
+  chartLayoutSaveTimer = window.setTimeout(() => { chartLayoutSaveTimer = null; captureChartLayout() }, 160)
+}
+
+function flushChartLayout() {
+  if (chartLayoutSaveTimer != null) window.clearTimeout(chartLayoutSaveTimer)
+  chartLayoutSaveTimer = null
+  return captureChartLayout()
+}
+
+export function saveChartLayout() {
+  if (state.mode !== 'live') return showToast('退出 Replay 后再保存图表')
+  if (!chartLayoutReady || !coreChart?.getDataList().length) return showToast('图表尚未加载完成')
+  if (flushChartLayout()) showToast('图表已保存')
+}
+
+async function restoreChartLayout(core: CoreChart) {
+  const layout = activeChartLayout()
+  const supported = new Set(getSupportedIndicators())
+  for (const item of layout.indicators) {
+    if (!supported.has(item.name)) continue
+    const pane = item.pane === 'candle_pane'
+      ? (core as ChartInternals).getAllDrawPanes().find((pane) => pane.getId() === 'candle_pane')
+      : paneForIndicator(core, item.name)
+    if (!pane) continue
+    core.overrideIndicator({ name: item.name, calcParams: item.calcParams, visible: item.visible,
+      styles: item.styles || undefined, series: item.series }, pane.getId())
+    if (item.height && pane.getId() !== 'candle_pane') core.setPaneOptions({ id: pane.getId(), height: item.height })
+  }
+  if (layout.pineSource) {
+    try { await applyPineScript(layout.pineSource) }
+    catch (error) { if (coreChart === core) showToast(`Pine Script: ${error instanceof Error ? error.message : String(error)}`) }
+  }
+  if (coreChart !== core || activeChartLayout() !== layout) return
+  restoreChartView(core, layout)
+  restoreChartDrawings(core, layout)
+  chartLayoutReady = true
+}
+
+function restoreChartDrawings(core: CoreChart, layout: ChartLayout) {
+  const overlays = new Set(getSupportedOverlays())
+  for (const drawing of layout.drawings.filter(({ symbol }) => symbol === state.symbol.id)) {
+    if (!overlays.has(drawing.name)) continue
+    const paneId = drawing.pane === 'candle_pane' ? drawing.pane : paneForIndicator(core, drawing.pane)?.getId()
+    if (paneId) {
+      const { pane: _pane, symbol: _symbol, ...overlay } = drawing
+      core.createOverlay(overlay, paneId)
+    }
+  }
+}
+
+function restoreChartView(core: CoreChart, layout: ChartLayout) {
+  const view = layout.views[viewKey()]
+  const internals = core as ChartInternals
+  internals.getAllDrawPanes().forEach((pane) => {
+    if (pane.getId() !== 'x_axis_pane') pane.getAxisComponent().setAutoCalcTickFlag(true)
+  })
+  if (view && Number.isFinite(view.barSpace) && view.barSpace > 0) {
+    core.setBarSpace(view.barSpace)
+    const scale = internals.getChartStore().getTimeScaleStore()
+    core.scrollByDistance((scale.getLastBarRightSideDiffBarCount() - view.rightBars) * core.getBarSpace())
+  } else core.setBarSpace(chartDefaultBarSpace)
+  if (view) {
+    for (const [key, height] of Object.entries(view.paneHeights || {})) {
+      const pane = paneForIndicator(core, key)
+      if (pane && Number.isFinite(height) && height > 0) core.setPaneOptions({ id: pane.getId(), height })
+    }
+    for (const [key, range] of Object.entries(view.ranges)) {
+      const pane = key === 'candle_pane'
+        ? (core as ChartInternals).getAllDrawPanes().find((pane) => pane.getId() === key)
+        : paneForIndicator(core, key)
+      if (pane && Object.values(range).every(Number.isFinite)) pane.getAxisComponent().setRange(range)
+    }
+  }
+  internals.adjustPaneViewport(false, true, true, true, true)
+}
+
+function restoreChartContextOnData(core: CoreChart, pineReady?: Promise<void>) {
+  const serial = ++chartContextSerial
+  const symbol = state.symbol.id
+  const timeframe = state.timeframe
+  const restore = () => {
+    if (serial !== chartContextSerial || coreChart !== core || state.symbol.id !== symbol || state.timeframe !== timeframe) {
+      core.unsubscribeAction(ActionType.OnDataReady, restore)
+      return
+    }
+    const current = core.getDataList()
+    const expected = state.bars[state.liveHead]
+    if (!current.length || !expected || current.at(-1)?.timestamp !== expected.timestamp || current.at(-1)?.close !== expected.close) return
+    core.unsubscribeAction(ActionType.OnDataReady, restore)
+    const finish = () => {
+      if (serial !== chartContextSerial || coreChart !== core || state.symbol.id !== symbol || state.timeframe !== timeframe) return
+      restoreChartDrawings(core, activeChartLayout())
+      restoreChartView(core, activeChartLayout())
+      chartLayoutReady = true
+      queueChartLayoutSave()
+    }
+    if (pineReady) void pineReady.then(finish)
+    else finish()
+  }
+  core.subscribeAction(ActionType.OnDataReady, restore)
+  window.requestAnimationFrame(restore)
+}
+
+export function createChartLayout() {
+  if (state.loading) return
+  const layout = newChartLayout(state.symbol, state.timeframe, uniqueChartName('图表', 1))
+  chartLayouts.items.push(layout)
+  void selectChartLayout(layout.id)
+}
+
+function uniqueChartName(base: string, start = 0) {
+  let number = start
+  let name = number ? `${base} ${number}` : base
+  while (chartLayouts.items.some((item) => item.name === name)) {
+    number = Math.max(2, number + 1)
+    name = `${base} ${number}`
+  }
+  return name
+}
+
+export function duplicateChartLayout(id: string) {
+  if (state.loading) return
+  if (id === chartLayouts.activeId) flushChartLayout()
+  const source = chartLayouts.items.find((item) => item.id === id)
+  if (!source) return
+  const layout: ChartLayout = { ...structuredClone(source), id: crypto.randomUUID(), name: uniqueChartName(`${source.name} 副本`) }
+  chartLayouts.items.push(layout)
+  void selectChartLayout(layout.id)
+}
+
+export function renameChartLayout(id: string, name: string) {
+  const layout = chartLayouts.items.find((item) => item.id === id)
+  const next = name.trim().slice(0, 40)
+  if (!layout || !next) return
+  layout.name = next
+  writeChartLayouts()
+  notify()
+}
+
+export async function deleteChartLayout(id: string) {
+  if (state.loading || chartLayouts.items.length < 2) return
+  if (id === chartLayouts.activeId) {
+    const next = chartLayouts.items.find((item) => item.id !== id)!
+    await selectChartLayout(next.id)
+    if (chartLayouts.activeId !== next.id) return
+  }
+  chartLayouts.items = chartLayouts.items.filter((item) => item.id !== id)
+  writeChartLayouts()
+  notify()
+}
+
+export async function selectChartLayout(id: string) {
+  const target = chartLayouts.items.find((item) => item.id === id)
+  if (!target || id === chartLayouts.activeId || state.loading) return
+  const wasLive = state.mode === 'live'
+  if (wasLive) flushChartLayout()
+  else chartLayoutReady = false
+  const serial = ++chartLayoutSwitch
+  if (state.mode !== 'live') exitReplay(false)
+  showLoading(true)
+  try {
+    const changed = target.symbol.id !== state.symbol.id || target.timeframe !== state.timeframe
+    const bars = changed ? await loadBars(target.symbol.id, target.timeframe) : null
+    if (serial !== chartLayoutSwitch) return
+    if (wasLive) flushChartLayout()
+    chartLayoutReady = false
+    state.symbol = { ...target.symbol }
+    state.timeframe = target.timeframe
+    state.pineSource = target.pineSource
+    state.currentQuote = null
+    if (bars) setupReplay(bars)
+    chartLayouts.activeId = id
+    saveChartPreferences()
+    writeChartLayouts()
+    connectQuoteStream()
+    updateReplayView()
+    notify()
+  } catch (error) {
+    chartLayoutReady = true
+    showToast(`图表切换失败: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    if (serial === chartLayoutSwitch) showLoading(false)
+  }
+}
+
 export function dispose() {
+  flushChartLayout()
   startupGeneration++
   stopPlayback()
   state.eventSource?.close()
@@ -174,6 +467,12 @@ function saveChartPreferences() {
   const { id, exchange, symbol, description, type, logoId, providerId, sourceLogoId } = state.symbol
   localStorage.setItem(MARKET_STORAGE_KEY, JSON.stringify({ id, exchange, symbol, description, type, logoId, providerId, sourceLogoId }))
   localStorage.setItem(TIMEFRAME_STORAGE_KEY, state.timeframe)
+  if (state.mode === 'live') {
+    const layout = activeChartLayout()
+    layout.symbol = { ...state.symbol }
+    layout.timeframe = state.timeframe
+    writeChartLayouts()
+  }
 }
 
 function loadFavoriteTimeframes(): string[] {
@@ -347,6 +646,9 @@ export function resizeChart() {
 }
 
 export function unmountChart() {
+  chartLayoutReady = false
+  if (chartLayoutSaveTimer != null) window.clearTimeout(chartLayoutSaveTimer)
+  chartLayoutSaveTimer = null
   pineGeneration++
   removePineIndicator()
   chartEvents?.abort()
@@ -362,10 +664,13 @@ export function unmountChart() {
 function renderChart() {
   if (!chartContainer) return
   const period = currentTimeframe().period
+  const indicators = activeChartLayout().indicators
   chart = new KLineChartPro({
     container: chartContainer, theme: 'dark', locale: 'zh-CN', timezone: 'Asia/Shanghai',
     drawingBarVisible: true, symbol: chartSymbol(state.symbol), period, periods: [period],
-    mainIndicators: ['MA'], subIndicators: ['VOL'], datafeed: replayDatafeed,
+    mainIndicators: indicators.filter(({ pane }) => pane === 'candle_pane').map(({ name }) => name),
+    subIndicators: indicators.filter(({ pane }) => pane !== 'candle_pane').map(({ name }) => name),
+    datafeed: replayDatafeed,
   })
   bindChartInteractions()
 }
@@ -386,6 +691,7 @@ function bindChartInteractions() {
     return
   }
   const core = coreChart
+  chartDefaultBarSpace = core.getBarSpace()
   const { icons, text } = core.getStyles().indicator.tooltip
   const openEye = icons.find(({ id }) => id === 'visible')?.icon
   const closedEye = icons.find(({ id }) => id === 'invisible')?.icon
@@ -408,7 +714,39 @@ function bindChartInteractions() {
     if (data.iconId === 'pine-remove') clearPineScript()
   })
   ;[ActionType.OnZoom, ActionType.OnScroll, ActionType.OnVisibleRangeChange, ActionType.OnPaneDrag]
-    .forEach((type) => core.subscribeAction(type, syncTradeLayerPosition))
+    .forEach((type) => core.subscribeAction(type, () => { syncTradeLayerPosition(); queueChartLayoutSave() }))
+  const watchChange = () => window.setTimeout(queueChartLayoutSave, 0)
+  const createOverlay = core.createOverlay.bind(core)
+  core.createOverlay = (...args) => { const value = createOverlay(...args); watchChange(); return value }
+  const overrideOverlay = core.overrideOverlay.bind(core)
+  core.overrideOverlay = (...args) => { overrideOverlay(...args); watchChange() }
+  const removeOverlay = core.removeOverlay.bind(core)
+  core.removeOverlay = (...args) => { removeOverlay(...args); watchChange() }
+  const createIndicator = core.createIndicator.bind(core)
+  core.createIndicator = (...args) => {
+    const value = createIndicator(...args)
+    if ((typeof args[0] === 'string' ? args[0] : args[0].name) !== 'PINE_SCRIPT') watchChange()
+    return value
+  }
+  const overrideIndicator = core.overrideIndicator.bind(core)
+  core.overrideIndicator = (...args) => { overrideIndicator(...args); if (args[0].name !== 'PINE_SCRIPT') watchChange() }
+  const removeIndicator = core.removeIndicator.bind(core)
+  core.removeIndicator = (...args) => { removeIndicator(...args); if (args[1] !== 'PINE_SCRIPT') watchChange() }
+  const setPaneOptions = core.setPaneOptions.bind(core)
+  core.setPaneOptions = (...args) => { setPaneOptions(...args); watchChange() }
+  document.addEventListener('pointerup', queueChartLayoutSave, { signal: chartEvents.signal })
+  document.addEventListener('keyup', queueChartLayoutSave, { signal: chartEvents.signal })
+  document.addEventListener('change', queueChartLayoutSave, { signal: chartEvents.signal })
+  const restore = () => {
+    if (chartLayoutReady || !core.getDataList().length) return
+    // The ready flag stays false until the one-time async Pine restoration finishes.
+    core.unsubscribeAction(ActionType.OnDataReady, restore)
+    void restoreChartLayout(core).catch((error: unknown) => {
+      if (coreChart === core) showToast(`图表恢复失败: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+  core.subscribeAction(ActionType.OnDataReady, restore)
+  restore()
   root.addEventListener('wheel', syncTradeLayerPosition, { passive: true, signal: chartEvents.signal })
   root.addEventListener('mousemove', (event) => {
     if (state.mode !== 'select') return
@@ -423,9 +761,6 @@ function bindChartInteractions() {
     if (timestamp) selectReplayBar(timestamp)
   }, { signal: chartEvents.signal })
   root.addEventListener('contextmenu', (event) => openChartContextMenu(event, root), { signal: chartEvents.signal })
-  if (state.pineSource) void applyPineScript(state.pineSource).catch((error: unknown) => {
-    if (coreChart === core) showToast(`Pine Script: ${error instanceof Error ? error.message : String(error)}`)
-  })
   resizeChart()
   renderTradeLayer()
 }
@@ -441,17 +776,21 @@ function removePineIndicator() {
   pineClient = null
 }
 
-function refreshPineIndicator() {
-  if (!state.pineSource) return
+function refreshPineIndicator(): Promise<void> {
+  if (!state.pineSource) return Promise.resolve()
   const source = state.pineSource
   removePineIndicator()
-  void applyPineScript(source).catch((error: unknown) => showToast(`Pine Script: ${error instanceof Error ? error.message : String(error)}`))
+  return applyPineScript(source).then(() => {}, (error: unknown) => {
+    showToast(`Pine Script: ${error instanceof Error ? error.message : String(error)}`)
+  })
 }
 
 export function clearPineScript() {
   pineGeneration++
   removePineIndicator()
   state.pineSource = ''
+  activeChartLayout().pineSource = ''
+  writeChartLayouts()
   notify()
 }
 
@@ -560,6 +899,8 @@ export async function applyPineScript(source: string) {
       pinePanes.push('candle_pane')
     }
     state.pineSource = source
+    activeChartLayout().pineSource = source
+    writeChartLayouts()
     notify()
   } catch (error) {
     if (pineClient === client) removePineIndicator()
@@ -759,6 +1100,7 @@ export function setPaperPanelHeight(height: number, maxHeight = Number.POSITIVE_
 }
 
 export function saveOnPageHide() {
+  flushChartLayout()
   if (persistTimer != null) void persistPaperState({ keepalive: true })
 }
 
@@ -901,16 +1243,24 @@ async function switchSymbol(item: MarketSymbol) {
     closeSymbolSearch()
     return
   }
+  const wasLive = state.mode === 'live'
+  if (wasLive) flushChartLayout()
+  else chartLayoutReady = false
   showLoading(true)
-  exitReplay()
+  exitReplay(false)
   try {
+    const bars = await loadBars(item.id)
+    if (wasLive) flushChartLayout()
+    chartLayoutReady = false
+    const core = coreChart
+    core?.removeOverlay()
     state.symbol = { ...item }
     state.currentQuote = null
-    setupReplay(await loadBars(item.id))
+    setupReplay(bars)
     saveChartPreferences()
-    const core = coreChart
     if (core && chart) {
       resetPriceAxis()
+      restoreChartContextOnData(core)
       core.clearData()
       chart.setSymbol(chartSymbol(state.symbol))
       core.applyNewData(chartWindowData(), true)
@@ -919,7 +1269,7 @@ async function switchSymbol(item: MarketSymbol) {
       }
       window.requestAnimationFrame(() => {
         if (coreChart !== core) return
-        core.scrollToRealTime()
+        if (!activeChartLayout().views[viewKey()]) core.scrollToRealTime()
       })
     }
     updateReplayView()
@@ -927,6 +1277,7 @@ async function switchSymbol(item: MarketSymbol) {
     closeSymbolSearch()
     persistPaperState()
   } catch (error) {
+    chartLayoutReady = true
     showToast(`数据加载失败: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
     showLoading(false)
@@ -940,22 +1291,31 @@ export async function switchTimeframe(timeframe: string) {
     notify()
     return
   }
+  const wasLive = state.mode === 'live'
+  if (wasLive) flushChartLayout()
+  else chartLayoutReady = false
   showLoading(true)
-  exitReplay()
+  exitReplay(false)
   try {
     const bars = await loadBars(state.symbol.id, timeframe)
+    if (wasLive) flushChartLayout()
+    chartLayoutReady = false
+    const core = coreChart
+    core?.removeOverlay()
     state.timeframe = timeframe
     setupReplay(bars)
     saveChartPreferences()
     notify()
     resetPriceAxis()
     chart?.setPeriod({ ...currentTimeframe().period })
-    refreshPineIndicator()
+    const pineReady = refreshPineIndicator()
+    if (core) restoreChartContextOnData(core, pineReady)
     updateReplayView()
     state.timeframeMenuOpen = false
     notify()
     persistPaperState()
   } catch (error) {
+    chartLayoutReady = true
     showToast(`周期切换失败: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
     showLoading(false)
@@ -1072,6 +1432,7 @@ export function openReplay() {
 
 export function startBarSelection() {
   const wasReplay = state.mode === 'replay'
+  if (state.mode === 'live') flushChartLayout()
   stopPlayback()
   state.mode = 'select'
   state.selectionTimestamp = null
@@ -1104,8 +1465,13 @@ export function showReplayWorkspace() {
   notify()
 }
 
-export function exitReplay() {
+export function exitReplay(restoreLayout = true) {
   const shouldRefresh = state.mode === 'replay'
+  const core = coreChart
+  if (restoreLayout && state.mode !== 'live') {
+    chartLayoutReady = false
+    core?.removeOverlay()
+  }
   stopPlayback()
   state.mode = 'live'
   setPaperPanelOpen(state.paperPanelOpen, { save: false })
@@ -1116,7 +1482,12 @@ export function exitReplay() {
   persistPaperState()
   if (shouldRefresh) {
     resetPriceAxis()
+    if (restoreLayout && core) restoreChartContextOnData(core)
     refreshChart()
+  } else if (restoreLayout && core) {
+    restoreChartDrawings(core, activeChartLayout())
+    restoreChartView(core, activeChartLayout())
+    chartLayoutReady = true
   }
   updateMarketDetails()
   notify()
@@ -1198,7 +1569,6 @@ export function changeHistoryPage(delta: number) {
 }
 
 export function resetAccount() {
-  if (!window.confirm('重置模拟账户至 $100,000？\n\n所有持仓和挂单将被清空，历史记录会保留。')) return
   resetPaperAccount(state.paper, INITIAL_CASH)
   markPaperChanged()
   state.orderDraft = null
