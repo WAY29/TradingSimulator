@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { calculatePine } from './pine.ts'
-import { pineLegend, pineSubPrecision } from './pine-renderer.ts'
+import { drawPine, pineLegend, pineSubPrecision } from './pine-renderer.ts'
 import { PINE_EXAMPLE } from './pine-example.ts'
 
 const symbol = 'BINANCE:BTCUSDT'
@@ -10,14 +10,36 @@ const full = await calculatePine(ema, daily, 'D', symbol)
 assert.equal(full.overlay, true)
 assert.equal(full.plots[0].color, '#00BCD4')
 assert.equal(full.rows.at(-1)?.p0, 3)
+let lineDash = [4, 4]
+const strokes: number[][] = []
+const ctx = {
+  save() {}, restore() { lineDash = [4, 4] },
+  setLineDash(pattern: number[]) { lineDash = pattern },
+  beginPath() {}, rect() {}, clip() {}, moveTo() {}, lineTo() {},
+  fillRect() {},
+  stroke() { strokes.push([...lineDash]) },
+}
+drawPine({ ctx, kLineDataList: daily, visibleRange: { from: 0, to: 3 }, bounding: { width: 40, height: 40 },
+  barSpace: { bar: 10 }, xAxis: { convertToPixel: (index: number) => index * 10 },
+  yAxis: { convertToPixel: (price: number) => price },
+} as unknown as Parameters<typeof drawPine>[0], full, true)
+assert.ok(strokes.length > 0)
+assert.ok(strokes.every((pattern) => pattern.length === 0))
+assert.deepEqual(lineDash, [4, 4])
 const replay = await calculatePine(ema, daily.slice(0, 3), 'D', symbol)
 assert.equal(replay.rows.at(-1)?.p0, 2)
 assert.equal(replay.rows.length, 3)
 
-const histogram = await calculatePine('//@version=6\nindicator("Delta")\nplot(close - open, "Delta", style=plot.style_histogram)\nhline(0, "Zero")', daily, 'D', symbol)
+const histogram = await calculatePine('//@version=6\nindicator("Delta")\nplot(close - open, "Delta", style=plot.style_histogram)\nhline(0, "Zero", linestyle=hline.style_dashed)', daily, 'D', symbol)
 assert.equal(histogram.overlay, false)
 assert.deepEqual(histogram.plots.map(({ style }) => style), ['histogram', 'hline'])
 assert.equal(histogram.rows[0].p1, 0)
+strokes.length = 0
+drawPine({ ctx, kLineDataList: daily, visibleRange: { from: 0, to: 3 }, bounding: { width: 40, height: 40 },
+  barSpace: { bar: 10 }, xAxis: { convertToPixel: (index: number) => index * 10 },
+  yAxis: { convertToPixel: (price: number) => price },
+} as unknown as Parameters<typeof drawPine>[0], histogram, false)
+assert.deepEqual(strokes, [[6, 4]])
 const dynamic = await calculatePine('//@version=6\nindicator("Colors")\nplot(close, "Colored", color=close > 2 ? color.lime : color.red)', daily, 'D', symbol)
 assert.notEqual(dynamic.rows[0].c0, dynamic.rows.at(-1)?.c0)
 const identity = '//@version=5\nindicator("Symbol")\nplot(syminfo.ticker == "BTCUSDT" ? 1 : 2)'

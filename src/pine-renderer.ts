@@ -409,6 +409,7 @@ export function drawPine(params: Draw, result: PineResult | null, main: boolean)
   if (!result || result.rows.length !== params.kLineDataList.length) return true
   const { ctx, bounding } = params
   ctx.save()
+  ctx.setLineDash([])
   ctx.beginPath(); ctx.rect(0, 0, bounding.width, bounding.height); ctx.clip()
   drawBackground(params, result, main)
   drawFills(params, result, main)
