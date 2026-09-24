@@ -8,7 +8,9 @@ import {
   closePaperPosition,
   createPaperAccount,
   normalizePaperAccount,
+  normalizePaperFill,
   pagePaperHistory,
+  paperTradeHistory,
   paperSummary,
   paperPosition,
   placePaperOrder,
@@ -74,7 +76,6 @@ const state: ControllerState = {
   searchQuery: '',
   searchResults: [],
   selectionTimestamp: null,
-  focusTimestamp: null,
   restoredSession: null,
   paperPanelOpen: false,
   paperPanelHeight: PAPER_PANEL_MIN_HEIGHT,
@@ -101,6 +102,11 @@ let dragEvents: AbortController | null = null
 let liveSubscriber: DatafeedSubscribeCallback | null = null
 let searchTimer: number | null = null
 let persistTimer: number | null = null
+let saveInFlight: Promise<void> | null = null
+let saveAgain = false
+let paperSyncSerial = 0
+let paperDirty = false
+let paperChannel: BroadcastChannel | null = null
 let toastTimer: number | null = null
 let persistErrorShown = false
 let startupGeneration = 0
@@ -125,6 +131,8 @@ export function dispose() {
   liveSubscriber = null
   if (searchTimer) window.clearTimeout(searchTimer)
   if (persistTimer != null) void persistPaperState({ keepalive: true })
+  paperChannel?.close()
+  paperChannel = null
   if (toastTimer) window.clearTimeout(toastTimer)
   unmountChart()
   dragEvents?.abort()
@@ -197,16 +205,10 @@ const replayDatafeed: Datafeed = {
     if (`${symbol.exchange}:${symbol.ticker}` !== requestedSymbol || period.multiplier !== activePeriod.multiplier || period.timespan !== activePeriod.timespan) return []
     const inReplay = state.mode === 'replay'
     const end = inReplay ? state.replayHead : state.liveHead
-    const focusIndex = !inReplay && state.focusTimestamp != null
-      ? state.bars.findIndex(({ timestamp }) => timestamp === state.focusTimestamp)
-      : -1
-    const focused = focusIndex >= 0
     const start = inReplay
       ? state.replayStart
-      : focused ? Math.max(0, focusIndex - Math.floor(REPLAY_WINDOW / 2)) : Math.max(0, end - REPLAY_WINDOW + 1)
-    const visibleEnd = inReplay
-      ? end
-      : focused ? Math.min(state.bars.length - 1, focusIndex + Math.floor(REPLAY_WINDOW / 2)) : end
+      : Math.max(0, end - REPLAY_WINDOW + 1)
+    const visibleEnd = end
     const firstVisible = state.bars[start]
     const endTimestamp = state.bars[visibleEnd]?.timestamp
     if (!firstVisible || !endTimestamp) return []
@@ -280,7 +282,7 @@ async function catchUpPaperOrders() {
     const timeframe = TIMEFRAMES.find(({ duration }) => duration && elapsed <= duration * 900)?.id || 'M'
     try {
       const bars = await loadBars(symbol, timeframe, 1000, undefined, true)
-      processPaperBars(state.paper, bars.filter((bar) => bar.timestamp >= activeAt), symbol)
+      if (processPaperBars(state.paper, bars.filter((bar) => bar.timestamp >= activeAt), symbol).length) markPaperChanged()
     } catch (error) {
       console.error(`Paper order catch-up failed for ${symbol}:`, error)
       showToast('历史订单补偿失败')
@@ -321,16 +323,8 @@ function setupReplay(bars: Bar[]) {
 
 function chartWindowData() {
   const end = state.mode === 'replay' ? state.replayHead : state.liveHead
-  const focusIndex = state.mode !== 'replay' && state.focusTimestamp != null
-    ? state.bars.findIndex(({ timestamp }) => timestamp === state.focusTimestamp)
-    : -1
-  const start = focusIndex >= 0
-    ? Math.max(0, focusIndex - Math.floor(REPLAY_WINDOW / 2))
-    : state.mode === 'replay' ? state.replayStart : Math.max(0, end - REPLAY_WINDOW + 1)
-  const visibleEnd = focusIndex >= 0
-    ? Math.min(state.bars.length - 1, focusIndex + Math.floor(REPLAY_WINDOW / 2))
-    : end
-  return state.bars.slice(start, visibleEnd + 1)
+  const start = state.mode === 'replay' ? state.replayStart : Math.max(0, end - REPLAY_WINDOW + 1)
+  return state.bars.slice(start, end + 1)
 }
 
 export function mountChart(container: HTMLElement) {
@@ -571,18 +565,22 @@ async function loadPaperState(): Promise<SavedState | null> {
   return response.json() as Promise<SavedState | null>
 }
 
-function applyPaperState(saved: SavedState | null) {
-  if (!saved?.paper || !saved.session) return
+function applyPaperAccount(paper: Partial<PaperAccount>, fallbackSymbol?: string) {
   const empty = createPaperAccount({ initialBalance: INITIAL_CASH, feeRate: FEE_RATE, slippageRate: SLIPPAGE_RATE })
   state.paper = {
     ...empty,
-    ...saved.paper,
-    positions: saved.paper.positions || empty.positions,
-    orders: saved.paper.orders || [],
-    orderHistory: saved.paper.orderHistory || [],
-    trades: saved.paper.trades || [],
+    ...paper,
+    positions: paper.positions || empty.positions,
+    orders: paper.orders || [],
+    orderHistory: paper.orderHistory || [],
+    trades: paper.trades || [],
   }
-  normalizePaperAccount(state.paper, saved.session.symbol?.id)
+  normalizePaperAccount(state.paper, fallbackSymbol)
+}
+
+function applyPaperState(saved: SavedState | null) {
+  if (!saved?.paper || !saved.session) return
+  applyPaperAccount(saved.paper, saved.session.symbol?.id)
   state.paperTab = saved.session.paperTab || 'positions'
   state.paperPanelOpen = Boolean(saved.session.paperPanelOpen)
   if (saved.session.mode === 'replay' && validSymbol(saved.session.symbol) && TIMEFRAMES.some(({ id }) => id === saved.session.timeframe)) {
@@ -625,25 +623,44 @@ function paperStateSnapshot() {
 async function persistPaperState({ keepalive = false } = {}) {
   if (persistTimer != null) window.clearTimeout(persistTimer)
   persistTimer = null
-  try {
-    const response = await fetch('/api/paper/state', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(paperStateSnapshot()),
-      keepalive,
-    })
-    if (!response.ok) throw new Error(`Paper state HTTP ${response.status}`)
-    persistErrorShown = false
-  } catch (error) {
-    console.error('Paper state save failed:', error)
-    if (!persistErrorShown) showToast('模拟交易状态保存失败')
-    persistErrorShown = true
-  }
+  if (saveInFlight) { saveAgain = true; return saveInFlight }
+  saveInFlight = (async () => {
+    do {
+      saveAgain = false
+      const serial = paperSyncSerial
+      const snapshot = paperStateSnapshot()
+      try {
+        const response = await fetch('/api/paper/state', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(snapshot),
+          keepalive,
+        })
+        if (!response.ok) throw new Error(`Paper state HTTP ${response.status}`)
+        persistErrorShown = false
+        if (serial !== paperSyncSerial) saveAgain = true
+        else {
+          paperDirty = false
+          paperChannel?.postMessage(snapshot.paper)
+        }
+      } catch (error) {
+        console.error('Paper state save failed:', error)
+        if (!persistErrorShown) showToast('模拟交易状态保存失败')
+        persistErrorShown = true
+      }
+    } while (saveAgain)
+  })().finally(() => { saveInFlight = null })
+  return saveInFlight
 }
 
 function queuePaperStateSave() {
   if (persistTimer != null) window.clearTimeout(persistTimer)
   persistTimer = window.setTimeout(persistPaperState, 120)
+}
+
+function markPaperChanged() {
+  paperDirty = true
+  paperSyncSerial++
 }
 
 function updateReplayView() {
@@ -669,7 +686,7 @@ export function setPaperPanelHeight(height: number, maxHeight = Number.POSITIVE_
 }
 
 export function saveOnPageHide() {
-  void persistPaperState({ keepalive: true })
+  if (persistTimer != null) void persistPaperState({ keepalive: true })
 }
 
 export function dismissMenus(target: HTMLElement | null) {
@@ -690,10 +707,10 @@ export function getPaperPanelData() {
   const positions = Object.values(state.paper.positions).filter(({ quantity }) => quantity).map((position) => ({
     ...position,
     protection: positionProtection(state.paper, position.symbol),
-    openingTimestamp: positionOpeningTrade(position.symbol)?.barTimestamp,
   }))
-  const orders = tab === 'orders' ? state.paper.orders : tab === 'order-history' ? state.paper.orderHistory : []
-  const trades = tab === 'trade-history' ? state.paper.trades : []
+  const orders = tab === 'orders' ? state.paper.orders : tab === 'order-history'
+    ? [...state.paper.orderHistory].sort((a, b) => b.createdAt - a.createdAt || b.id - a.id) : []
+  const trades = tab === 'trade-history' ? paperTradeHistory(state.paper.trades, state.paper.orderHistory) : []
   const items: (PaperOrder | PaperTrade)[] = tab === 'order-history' ? orders : trades
   const view = state.historyView[tab]
   const page = tab.endsWith('history') ? pagePaperHistory(items, { ...view, pageSize: HISTORY_PAGE_SIZE }) : null
@@ -717,19 +734,18 @@ export function getPaperPanelData() {
 export function getTradeLayerData() {
   const position = paperPosition(state.paper, state.symbol.id)
   const replayTimestamp = currentBar()?.timestamp ?? 0
+  const orders = new Map(state.paper.orderHistory.map((order) => [order.id, order]))
   return {
     mode: state.mode,
     symbol: state.symbol,
     price: currentBar()?.close ?? state.currentQuote?.price ?? 0,
     position,
     orders: state.paper.orders.filter(({ symbol }) => symbol === state.symbol.id),
-    trades: state.paper.trades.filter((trade): trade is PaperFillTrade => trade.event !== 'balance-reset' && trade.symbol === state.symbol.id && (state.mode !== 'replay' || trade.barTimestamp <= replayTimestamp)),
+    trades: state.paper.trades.filter((trade): trade is PaperFillTrade => trade.event !== 'balance-reset' && trade.symbol === state.symbol.id)
+      .map((trade) => normalizePaperFill(trade, orders.get(trade.id)))
+      .filter((trade) => state.mode !== 'replay' || trade.barTimestamp <= replayTimestamp),
     draft: state.orderDraft,
   }
-}
-
-export function positionOpeningTrade(symbol: string): PaperFillTrade | undefined {
-  return state.paper.trades.find((trade): trade is PaperFillTrade => trade.event !== 'balance-reset' && trade.symbol === symbol && trade.openedQuantity > 0)
 }
 
 export function orderTypeLabel(order: Pick<PaperOrder, 'role' | 'type'>) {
@@ -792,7 +808,7 @@ function processLivePaperQuote(quote: Quote) {
   if (state.mode !== 'live' || (!state.paper.positions[quote.id] && !state.paper.orders.some(({ symbol }) => symbol === quote.id))) return
   const tick = { timestamp: quote.timestamp, open: quote.price, high: quote.price, low: quote.price, close: quote.price, volume: 0 }
   const fills = processPaperBar(state.paper, tick, quote.id, state.liveHead)
-  if (fills.length) queuePaperStateSave()
+  if (fills.length) { markPaperChanged(); queuePaperStateSave() }
   if (state.paperPanelOpen) notify()
 }
 
@@ -807,17 +823,15 @@ function connectQuoteStream() {
   state.eventSource.onerror = () => { state.streamStatus = '重连中'; notify() }
 }
 
-async function switchSymbol(item: MarketSymbol, jumpTimestamp: number | null = null) {
+async function switchSymbol(item: MarketSymbol) {
   if (item.id === state.symbol.id) {
     closeSymbolSearch()
-    if (jumpTimestamp != null && Number.isFinite(jumpTimestamp)) jumpToChartTimestamp(jumpTimestamp)
     return
   }
   showLoading(true)
   exitReplay()
   try {
     state.symbol = { ...item }
-    state.focusTimestamp = jumpTimestamp != null && Number.isFinite(jumpTimestamp) ? jumpTimestamp : null
     state.currentQuote = null
     setupReplay(await loadBars(item.id))
     saveChartPreferences()
@@ -832,8 +846,7 @@ async function switchSymbol(item: MarketSymbol, jumpTimestamp: number | null = n
       }
       window.requestAnimationFrame(() => {
         if (coreChart !== core) return
-        if (jumpTimestamp != null && Number.isFinite(jumpTimestamp)) jumpToChartTimestamp(jumpTimestamp)
-        else core.scrollToRealTime()
+        core.scrollToRealTime()
       })
     }
     updateReplayView()
@@ -859,7 +872,6 @@ export async function switchTimeframe(timeframe: string) {
   try {
     const bars = await loadBars(state.symbol.id, timeframe)
     state.timeframe = timeframe
-    state.focusTimestamp = null
     setupReplay(bars)
     saveChartPreferences()
     notify()
@@ -889,27 +901,12 @@ function paperSymbol(symbol: string): MarketSymbol {
   }
 }
 
-function jumpToPaperEvent(symbol: string, timestamp?: number | null) {
+function jumpToPaperEvent(symbol: string) {
   const item = paperSymbol(symbol)
-  if (!item) return
-  return switchSymbol(item, timestamp != null && Number.isFinite(timestamp) ? timestamp : null)
+  return switchSymbol(item)
 }
 
 export { jumpToPaperEvent }
-
-function jumpToChartTimestamp(timestamp: number) {
-  if (!state.bars.length) return
-  const target = state.bars.find(({ timestamp: value }) => value === timestamp)
-    || state.bars.reduce((closest, bar) => Math.abs(bar.timestamp - timestamp) < Math.abs(closest.timestamp - timestamp) ? bar : closest, state.bars[0])
-  if (!target || !coreChart) return
-  state.focusTimestamp = target.timestamp
-  resetPriceAxis()
-  coreChart.applyNewData(chartWindowData(), true)
-  window.requestAnimationFrame(() => {
-    coreChart?.scrollToTimestamp(target.timestamp, 300)
-    renderTradeLayer()
-  })
-}
 
 function addToWatchlist(item: MarketSymbol) {
   if (!state.watchlist.some(({ id }) => id === item.id)) {
@@ -967,7 +964,7 @@ export function displayTypeSpecs(typeSpecs: string[] = []) {
 export function step() {
   if (state.mode !== 'replay') return
   state.replayHead = Math.min(state.replayEnd, state.replayHead + 1)
-  processPaperBar(state.paper, currentBar(), state.symbol.id, state.replayHead)
+  if (processPaperBar(state.paper, currentBar(), state.symbol.id, state.replayHead).length) markPaperChanged()
   refreshChart()
   updateReplayView()
   if (state.replayHead >= state.replayEnd) stopPlayback()
@@ -1130,6 +1127,7 @@ export function changeHistoryPage(delta: number) {
 export function resetAccount() {
   if (!window.confirm('重置模拟账户至 $100,000？\n\n所有持仓和挂单将被清空，历史记录会保留。')) return
   resetPaperAccount(state.paper, INITIAL_CASH)
+  markPaperChanged()
   state.orderDraft = null
   state.paperTab = 'trade-history'
   closeChartContextMenu()
@@ -1137,14 +1135,14 @@ export function resetAccount() {
 }
 
 export function cancelOrder(id: number) {
-  cancelPaperOrder(state.paper, Number(id), currentBar().timestamp)
+  if (cancelPaperOrder(state.paper, Number(id), currentBar().timestamp)) markPaperChanged()
   updateReplayView()
 }
 
-export async function closePosition(symbol: string, timestamp?: number) {
-  await jumpToPaperEvent(symbol, timestamp)
+export async function closePosition(symbol: string) {
+  await jumpToPaperEvent(symbol)
   const position = paperPosition(state.paper, symbol)
-  closePaperPosition(state.paper, symbol, position.marketPrice || currentBar().close, currentBarIndex(), currentBar().timestamp)
+  if (closePaperPosition(state.paper, symbol, position.marketPrice || currentBar().close, currentBarIndex(), currentBar().timestamp)) markPaperChanged()
   updateReplayView()
 }
 
@@ -1210,7 +1208,7 @@ export function cancelDraft() {
 
 export function removeOrderProtection(id: number, field: ProtectionField) {
   const order = state.paper.orders.find(({ id: orderId }) => orderId === Number(id))
-  if (order) order[field] = null
+  if (order) { order[field] = null; markPaperChanged() }
   updateReplayView()
 }
 
@@ -1233,6 +1231,7 @@ export function submitOrderDraft() {
   try {
     const timestamp = state.mode === 'replay' ? currentBar().timestamp : state.currentQuote?.timestamp ?? Date.now()
     placePaperOrder(state.paper, { ...draft, symbol: state.symbol.id }, currentBar().close, currentBarIndex(), timestamp)
+    markPaperChanged()
     state.orderDraft = null
     updateReplayView()
   } catch (error) {
@@ -1267,17 +1266,17 @@ export function positionTradeLayerElements() {
 
 function positionTradeMarker(element: HTMLElement) {
   const timestamp = Number(element.dataset.markerTimestamp)
-  const bar = state.bars.find(({ timestamp: value }) => value === timestamp)
+  const bar = state.bars.findLast(({ timestamp: start }) => start <= timestamp && timestamp < nextBarTimestamp(start))
   if (!bar || !coreChart) return element.hidden = true
-  const coordinate = coreChart.convertToPixel({ timestamp }, { paneId: 'candle_pane', absolute: true })
-  const value = element.classList.contains('trade-marker-open') ? bar.low : bar.high
+  const coordinate = coreChart.convertToPixel({ timestamp: bar.timestamp }, { paneId: 'candle_pane', absolute: true })
+  const value = element.classList.contains('trade-marker-buy') ? bar.low : bar.high
   const top = tradePriceTop(value)
   const canvas = document.querySelector('#chart canvas')
   const main = document.querySelector('.tv-main')
   const x = coordinate?.x
   if (x == null || !Number.isFinite(x) || !Number.isFinite(top) || !canvas || !main) return element.hidden = true
   element.style.left = `${x + canvas.getBoundingClientRect().left - main.getBoundingClientRect().left}px`
-  element.style.top = `${top + (element.classList.contains('trade-marker-open') ? 12 : -12)}px`
+  element.style.top = `${top + (element.classList.contains('trade-marker-buy') ? 8 : -28)}px`
   element.hidden = false
 }
 
@@ -1383,7 +1382,7 @@ export function beginWorkingProtectionDrag(event: PointerEvent, element: HTMLEle
   const stop = () => {
     dragEvents?.abort()
     dragEvents = null
-    if (moved) updateReplayView()
+    if (moved) { markPaperChanged(); updateReplayView() }
   }
   document.addEventListener('pointermove', move, { signal })
   document.addEventListener('pointerup', stop, { signal })
@@ -1477,6 +1476,18 @@ export async function start() {
       if (generation !== startupGeneration) return
       console.error('Paper state load failed:', error)
       showToast('模拟交易状态读取失败')
+    }
+    paperChannel = new BroadcastChannel('trading-simulator:paper')
+    paperChannel.onmessage = ({ data }: MessageEvent<PaperAccount>) => {
+      if (!data || !Array.isArray(data.orders) || !Array.isArray(data.orderHistory) || !Array.isArray(data.trades)) return
+      if (paperDirty) return
+      paperSyncSerial++
+      if (persistTimer != null) window.clearTimeout(persistTimer)
+      persistTimer = null
+      if (saveInFlight) saveAgain = true
+      applyPaperAccount(data, state.symbol.id)
+      notify()
+      if (state.bars.length) connectQuoteStream()
     }
     const bars = await loadBars()
     if (generation !== startupGeneration) return

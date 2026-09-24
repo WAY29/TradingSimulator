@@ -1,4 +1,6 @@
-import type { OrderSide, OrderType, PaperAccount, PaperBar, PaperOrder, PaperOrderInput, PaperPosition } from './types'
+import type { OrderSide, OrderType, PaperAccount, PaperBar, PaperFillTrade, PaperOrder, PaperOrderInput, PaperPosition, PaperResetTrade, PaperTrade } from './types'
+
+export type PaperHistoryTrade = PaperResetTrade | (PaperFillTrade & { closedAt?: number })
 
 export function createPaperAccount({ initialBalance = 100_000, feeRate = 0.001, slippageRate = 0.0005 } = {}): PaperAccount {
   return {
@@ -165,6 +167,70 @@ export function pagePaperHistory<T extends { symbol?: string; side?: string }>(i
   }
 }
 
+export function activeOrderNumbers(orders: PaperOrder[]) {
+  const groups = [...new Set(orders.map(({ groupId }) => groupId).filter((id): id is number => id != null))].sort((a, b) => a - b)
+  return new Map(groups.map((id, index) => [id, index + 1]))
+}
+
+export function normalizePaperFill(trade: PaperFillTrade, order?: PaperOrder): PaperFillTrade {
+  const closedQuantity = trade.closedQuantity ?? (trade.openedQuantity != null ? trade.quantity - trade.openedQuantity
+    : (trade.reduceOnly ?? order?.reduceOnly ?? (trade.role === 'take-profit' || trade.role === 'stop-loss')) ? trade.quantity : 0)
+  return { ...trade, openedQuantity: trade.openedQuantity ?? trade.quantity - closedQuantity,
+    closedQuantity, parentId: trade.parentId ?? order?.parentId, barTimestamp: trade.barTimestamp ?? trade.timestamp }
+}
+
+export function paperTradeHistory(trades: PaperTrade[], orderHistory: PaperOrder[] = []): PaperHistoryTrade[] {
+  type Row = { trade: PaperHistoryTrade; last: number }
+  const rows: Row[] = []
+  const open = new Map<string, { row: Row; remaining: number }[]>()
+  const orders = new Map(orderHistory.map((order) => [order.id, order]))
+  ;[...trades].reverse().forEach((trade, index) => {
+    if (trade.event === 'balance-reset') {
+      open.clear()
+      rows.push({ trade, last: index })
+      return
+    }
+    const order = orders.get(trade.id)
+    const fill = normalizePaperFill(trade, order)
+    if (fill.closedQuantity > 0) {
+      const entries = open.get(fill.symbol) || []
+      let remaining = fill.closedQuantity
+      const parentId = fill.parentId
+      while (remaining > 0 && entries.length) {
+        const entryIndex = parentId == null ? 0 : Math.max(0, entries.findIndex(({ row }) => row.trade.id === parentId))
+        const entry = entries[entryIndex]
+        const quantity = Math.min(remaining, entry.remaining)
+        const fee = fill.fee * quantity / fill.quantity
+        const opening = entry.row.trade as PaperFillTrade & { closedAt?: number }
+        opening.fee += fee
+        opening.realizedPnl += (fill.realizedPnl + fill.fee) * quantity / fill.closedQuantity - fee
+        opening.closedQuantity += quantity
+        opening.closedAt = fill.timestamp
+        entry.row.last = index
+        entry.remaining -= quantity
+        remaining -= quantity
+        if (!entry.remaining) entries.splice(entryIndex, 1)
+      }
+      if (remaining > 0) {
+        // Older or incomplete histories may lack the matching entry; keep their realized P&L visible.
+        const fee = fill.fee * remaining / fill.quantity
+        rows.push({ trade: { ...fill, openedQuantity: 0, closedQuantity: remaining, quantity: remaining,
+          fee, realizedPnl: (fill.realizedPnl + fill.fee) * remaining / fill.closedQuantity - fee, closedAt: fill.timestamp }, last: index })
+      }
+    }
+    if (fill.openedQuantity > 0) {
+      const fee = fill.fee * fill.openedQuantity / fill.quantity
+      const row: Row = { trade: { ...fill, quantity: fill.openedQuantity, fee, realizedPnl: -fee, closedQuantity: 0 }, last: index }
+      rows.push(row)
+      const entries = open.get(fill.symbol) || []
+      entries.push({ row, remaining: fill.openedQuantity })
+      open.set(fill.symbol, entries)
+    }
+  })
+  const time = (trade: PaperHistoryTrade) => trade.event === 'balance-reset' ? trade.timestamp : trade.closedAt ?? trade.timestamp
+  return rows.sort((a, b) => time(b.trade) - time(a.trade) || b.last - a.last).map(({ trade }) => trade)
+}
+
 export function normalizePaperAccount(account: PaperAccount, fallbackSymbol?: string) {
   account.positions ||= {}
   const legacy = account.position
@@ -266,6 +332,7 @@ function fillOrder(account: PaperAccount, order: PaperOrder, price: number, barI
   finishOrder(account, order, 'filled', timestamp)
   account.trades.unshift({
     id: order.id,
+    parentId: order.parentId,
     symbol: order.symbol,
     side: order.side,
     type: order.type,

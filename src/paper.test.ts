@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import type { PaperAccount, PaperFillTrade, PaperOrder } from './types.ts'
 import {
+  activeOrderNumbers,
   cancelPaperOrder,
   closePaperPosition,
   createPaperAccount,
@@ -11,7 +12,9 @@ import {
   processPaperBars,
   projectedPnl,
   normalizePaperAccount,
+  normalizePaperFill,
   pagePaperHistory,
+  paperTradeHistory,
   resetPaperAccount,
 } from './paper.ts'
 
@@ -34,6 +37,15 @@ processPaperBar(account, { timestamp: 2, open: 100, high: 111, low: 95 }, 'BINAN
 assert.equal(paperPosition(account, 'BINANCE:BTCUSDT').quantity, 0)
 assert.equal(account.realizedPnl, 10)
 assert.equal(account.orders.length, 0)
+const firstHistory = paperTradeHistory(account.trades, account.orderHistory)
+assert.equal(firstHistory.length, 1)
+assert.equal(firstHistory[0].event, undefined)
+if (firstHistory[0].event !== 'balance-reset') {
+  assert.equal(firstHistory[0].id, firstEntry.id)
+  assert.equal(firstHistory[0].realizedPnl, 10)
+  assert.equal(firstHistory[0].closedAt, 2)
+  assert.equal(firstHistory[0].timestamp, 1)
+}
 
 const limit = placePaperOrder(account, {
   symbol: 'BINANCE:BTCUSDT', side: 'buy', type: 'limit', quantity: 2, price: 90,
@@ -54,6 +66,14 @@ assert.equal(paperPosition(account, 'BINANCE:BTCUSDT').averagePrice, 95)
 assert.equal(account.realizedPnl, 20)
 assert.equal((account.trades[0] as PaperFillTrade).realizedPnl, 10)
 assert.equal(paperSummary(account, 90, 'BINANCE:BTCUSDT').unrealizedPnl, 5)
+const reversalHistory = paperTradeHistory(account.trades, account.orderHistory)
+assert.equal(reversalHistory.filter((trade) => trade.event !== 'balance-reset').length, 3)
+const reversedEntry = reversalHistory.find((trade) => trade.id === limit.id)
+if (reversedEntry?.event !== 'balance-reset') {
+  assert.equal(reversedEntry?.closedQuantity, 2)
+  assert.equal(reversedEntry?.realizedPnl, 10)
+  assert.equal(reversedEntry?.closedAt, 6)
+}
 
 const pending = placePaperOrder(account, {
   symbol: 'BINANCE:BTCUSDT', side: 'sell', type: 'limit', quantity: 1, price: 100,
@@ -128,6 +148,76 @@ assert.equal(offlineFills.length, 1)
 assert.equal(offlineFills[0].role, 'stop-loss')
 assert.equal(paperPosition(offline, 'BINANCE:BTCUSDT').quantity, 0)
 assert.equal((offline.trades[0] as PaperFillTrade).price, 90)
+
+const linked = createPaperAccount({ initialBalance: 1_000_000, feeRate: 0.01, slippageRate: 0 })
+const older = placePaperOrder(linked, { symbol: 'BINANCE:BTCUSDT', side: 'buy', quantity: 1 }, 100, 0, 1)
+const protectedEntry = placePaperOrder(linked, { symbol: 'BINANCE:BTCUSDT', side: 'buy', quantity: 1, takeProfit: 130 }, 120, 0, 2)
+processPaperBar(linked, { timestamp: 3, open: 120, high: 131, low: 119 }, 'BINANCE:BTCUSDT', 1)
+const linkedHistory = paperTradeHistory(linked.trades, linked.orderHistory)
+assert.equal(linked.trades.length, 3)
+assert.equal(linkedHistory.length, 2)
+const olderRow = linkedHistory.find((trade) => trade.id === older.id)
+const protectedRow = linkedHistory.find((trade) => trade.id === protectedEntry.id)
+if (olderRow?.event !== 'balance-reset' && protectedRow?.event !== 'balance-reset') {
+  assert.equal(olderRow?.closedAt, undefined)
+  assert.equal(olderRow?.realizedPnl, -1)
+  assert.equal(protectedRow?.closedAt, 3)
+  assert.equal(protectedRow?.closedQuantity, 1)
+  assert.equal(protectedRow?.fee, 2.5)
+  assert.equal(protectedRow?.realizedPnl, 17.5)
+}
+assert.equal(linkedHistory.reduce((sum, trade) => sum + (trade.event === 'balance-reset' ? 0 : trade.realizedPnl), 0), linked.realizedPnl)
+
+const legacyTrades = linked.trades.filter((trade): trade is PaperFillTrade => trade.event !== 'balance-reset').map((trade) => ({ ...trade }))
+const legacyEntry = legacyTrades.find((trade) => trade.id === protectedEntry.id)
+const legacyExit = legacyTrades.find((trade) => trade.id !== protectedEntry.id && trade.id !== older.id)
+assert.ok(legacyEntry && legacyExit)
+delete (legacyEntry as Partial<PaperFillTrade>).openedQuantity
+delete (legacyEntry as Partial<PaperFillTrade>).closedQuantity
+delete (legacyEntry as Partial<PaperFillTrade>).reduceOnly
+delete (legacyExit as Partial<PaperFillTrade>).parentId
+const legacyEntryOrder = linked.orderHistory.find((order) => order.id === protectedEntry.id)
+const legacyExitOrder = linked.orderHistory.find((order) => order.id === legacyExit.id)
+assert.equal(normalizePaperFill(legacyEntry, legacyEntryOrder).openedQuantity, 1)
+assert.equal(normalizePaperFill(legacyEntry, legacyEntryOrder).barTimestamp, legacyEntry.timestamp)
+assert.equal(normalizePaperFill(legacyExit, legacyExitOrder).closedQuantity, 1)
+assert.equal(normalizePaperFill(legacyExit, legacyExitOrder).parentId, protectedEntry.id)
+const legacyHistory = paperTradeHistory(legacyTrades, linked.orderHistory)
+assert.equal(legacyHistory.length, 2)
+const matchedLegacy = legacyHistory.find((trade) => trade.id === protectedEntry.id)
+assert.equal(matchedLegacy?.event, undefined)
+if (matchedLegacy?.event !== 'balance-reset') {
+  assert.equal(matchedLegacy?.closedAt, 3)
+  assert.equal(matchedLegacy?.realizedPnl, 17.5)
+}
+
+const partial = createPaperAccount({ feeRate: 0.01, slippageRate: 0 })
+placePaperOrder(partial, { symbol: 'BINANCE:BTCUSDT', side: 'buy', quantity: 2 }, 100, 0, 1)
+placePaperOrder(partial, { symbol: 'BINANCE:BTCUSDT', side: 'sell', quantity: 1, reduceOnly: true }, 110, 1, 2)
+const partiallyClosed = paperTradeHistory(partial.trades)[0]
+if (partiallyClosed.event !== 'balance-reset') {
+  assert.equal(partiallyClosed.closedQuantity, 1)
+  assert.equal(partiallyClosed.closedAt, 2)
+  assert.equal(partiallyClosed.realizedPnl, 6.9)
+}
+closePaperPosition(partial, 'BINANCE:BTCUSDT', 90, 2, 3)
+const closed = paperTradeHistory(partial.trades)[0]
+assert.equal(paperTradeHistory(partial.trades).length, 1)
+if (closed.event !== 'balance-reset') {
+  assert.equal(closed.closedQuantity, 2)
+  assert.equal(closed.closedAt, 3)
+  assert.ok(Math.abs(closed.realizedPnl - partial.realizedPnl) < 1e-9)
+}
+
+assert.deepEqual([...activeOrderNumbers([
+  { groupId: 99 }, { groupId: 50 }, { groupId: 99 }, { groupId: null },
+] as PaperOrder[])], [[50, 1], [99, 2]])
+assert.deepEqual([...activeOrderNumbers([{ groupId: 99 }] as PaperOrder[])], [[99, 1]])
+
+const rewound = createPaperAccount({ feeRate: 0, slippageRate: 0 })
+const later = placePaperOrder(rewound, { symbol: 'BINANCE:BTCUSDT', side: 'buy', quantity: 1 }, 100, 0, 10)
+const earlier = placePaperOrder(rewound, { symbol: 'BINANCE:ETHUSDT', side: 'buy', quantity: 1 }, 100, 0, 5)
+assert.deepEqual(paperTradeHistory(rewound.trades).map(({ id }) => id), [later.id, earlier.id])
 
 const history = Array.from({ length: 12 }, (_, index) => ({
   id: index + 1,

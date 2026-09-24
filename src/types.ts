@@ -85,6 +85,7 @@ export interface PaperOrder {
 
 export interface PaperFillTrade {
   id: number
+  parentId?: number | null
   symbol: string
   side: OrderSide
   type: OrderType
@@ -180,7 +181,6 @@ export interface ControllerState {
   searchQuery: string
   searchResults: SearchResult[]
   selectionTimestamp: number | null
-  focusTimestamp: number | null
   restoredSession: ReplaySession | null
   paperPanelOpen: boolean
   paperPanelHeight: number

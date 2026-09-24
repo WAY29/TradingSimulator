@@ -136,8 +136,11 @@ button:disabled { cursor: not-allowed; opacity: .38; }
 .speed-menu button { width: 100%; height: 30px; border: 0; border-radius: 3px; color: #d1d4dc; background: transparent; font-size: 12px; text-align: left; }
 .speed-menu button:hover, .speed-menu button.active { background: #2a2e39; }
 .trade-layer { position: absolute; inset: 0 360px 0 0; z-index: 25; overflow: hidden; pointer-events: none; }
-.trade-marker { position: absolute; z-index: 1; width: 20px; height: 20px; transform: translateX(-50%); color: #22ab94; font-size: 21px; font-weight: 700; line-height: 20px; text-align: center; text-shadow: 0 1px 2px #101114; }
-.trade-marker-close { color: #f23645; }
+.trade-marker { position: absolute; z-index: 1; display: grid; width: 20px; height: 20px; place-items: center; transform: translateX(-50%); font-size: 0; filter: drop-shadow(0 0 2px #101114) drop-shadow(0 0 2px #101114); }
+.trade-marker::before { content: ''; width: 0; height: 0; border-right: 7px solid transparent; border-left: 7px solid transparent; }
+.trade-marker::after { content: attr(data-marker-kind); position: absolute; left: 19px; top: 1px; color: #fff; font-size: 11px; line-height: 18px; text-shadow: 0 1px 2px #101114; }
+.trade-marker-buy::before { border-bottom: 12px solid #22ab94; }
+.trade-marker-sell::before { border-top: 12px solid #f23645; }
 .trade-line { position: absolute; left: 52px; right: 64px; height: 0; border-top: 1px solid #2962ff; color: #d1d4dc; font-size: 12px; }
 .protection-zone { position: absolute; left: 52px; right: 64px; pointer-events: none; }
 .take-profit-zone { background: rgba(34, 171, 148, .14); }
@@ -233,7 +236,7 @@ button:disabled { cursor: not-allowed; opacity: .38; }
 .paper-row:hover { background: #1e222d; }
 .position-grid { min-width: 1180px; grid-template-columns: 1.4fr .65fr .65fr .95fr .85fr .85fr .9fr .9fr .95fr 32px; gap: 12px; }
 .order-grid { min-width: 1260px; grid-template-columns: 1.4fr .6fr .8fr .7fr 1fr .8fr .9fr .9fr .7fr 1.1fr 32px; gap: 12px; }
-.trade-grid { grid-template-columns: 1.4fr .6fr .8fr .7fr 1fr .8fr 1fr 1.1fr; gap: 12px; }
+.trade-grid { min-width: 1200px; grid-template-columns: 1.4fr .6fr .8fr .7fr 1fr .8fr 1fr 1.1fr 1.1fr; gap: 12px; }
 .table-action { width: 28px; height: 28px; border: 0; border-radius: 3px; color: #b2b5be; background: transparent; font-size: 18px; }
 .table-action:hover { color: #f23645; background: #2a2e39; }
 .order-status { text-transform: capitalize; }
