@@ -1,12 +1,14 @@
 import { KLineChartPro } from '@klinecharts/pro'
 import type { Datafeed, DatafeedSubscribeCallback, SymbolInfo } from '@klinecharts/pro'
-import { ActionType, dispose as disposeKLineChart, getSupportedIndicators, getSupportedOverlays, init as getKLineChart, LineType, registerIndicator } from 'klinecharts'
+import { ActionType, dispose as disposeKLineChart, getSupportedIndicators, getSupportedOverlays, init as getKLineChart, LineType, OverlayMode, registerIndicator } from 'klinecharts'
 import type { Chart, Coordinate, Indicator, KLineData, Overlay, OverlayEvent, Point } from 'klinecharts'
 import { PineClient } from './pine-client'
 import { drawPine, pineLegend, pineSubPrecision } from './pine-renderer'
 import type { PineResult } from './pine'
 import { newChartLayout, readChartLayouts, CHART_LAYOUTS_KEY } from './chart-layouts.ts'
 import type { ChartDrawing, ChartLayout, ChartView } from './chart-layouts.ts'
+import { registerTrendOverlays, TREND_TOOLS } from './drawing-tools.ts'
+import type { TrendToolName } from './drawing-tools.ts'
 import {
   cancelPaperOrder,
   closePaperPosition,
@@ -70,11 +72,16 @@ type SavedState = { paper: Partial<PaperAccount>; session: ReplaySession }
 const listeners = new Set<() => void>()
 const chartLayouts = readChartLayouts(localStorage, loadSelectedMarket(), loadSelectedTimeframe())
 const DRAWING_TOOLS_KEY = 'trading-simulator:drawing-tools'
+const TREND_TOOL_KEY = 'trading-simulator:trend-tool'
 let drawingTools: Array<number | null> = []
 try {
   const saved: unknown = JSON.parse(localStorage.getItem(DRAWING_TOOLS_KEY) || 'null')
   if (Array.isArray(saved)) drawingTools = saved.slice(0, 5).map((item) => Number.isInteger(item) && item >= 0 ? item as number : null)
 } catch {}
+const legacyTrendTools = ['horizontalStraightLine', 'horizontalRayLine', 'horizontalSegment', 'verticalStraightLine', 'verticalRayLine', 'verticalSegment', 'straightLine', 'rayLine', 'segment', 'arrow', 'priceLine']
+const storedTrendTool = localStorage.getItem(TREND_TOOL_KEY)
+let trendTool: TrendToolName = TREND_TOOLS.find(({ name }) => name === storedTrendTool)?.name ??
+  TREND_TOOLS.find(({ name }) => name === legacyTrendTools[drawingTools[0] ?? 8])?.name ?? 'segment'
 
 function activeChartLayout() {
   return chartLayouts.items.find(({ id }) => id === chartLayouts.activeId)!
@@ -155,6 +162,22 @@ let chartDefaultBarSpace = 8
 let chartLayoutSaveTimer: number | null = null
 let chartContextSerial = 0
 let selectedDrawing: string | null = null
+let drawingOptions = { lock: false, visible: true, mode: OverlayMode.Normal }
+const replayDrawingVisibility = new Map<string, boolean>()
+let syncingReplayDrawings = false
+
+registerTrendOverlays(() => coreChart as Chart | null, () => state.bars.slice(0, (state.mode === 'replay' ? state.replayHead : state.liveHead) + 1))
+
+export function getTrendTool() { return trendTool }
+
+export function selectTrendTool(name: TrendToolName) {
+  if (!TREND_TOOLS.some((tool) => tool.name === name) || state.mode === 'select') return
+  trendTool = name
+  try { localStorage.setItem(TREND_TOOL_KEY, name) } catch {}
+  selectedDrawing = null
+  coreChart?.createOverlay({ name, groupId: 'drawing_tools', ...drawingOptions })
+  notify()
+}
 
 export function getSelectedDrawing() {
   const selection = selectedDrawing
@@ -353,6 +376,20 @@ function restoreChartDrawings(core: CoreChart, layout: ChartLayout) {
       core.createOverlay(overlay, paneId)
     }
   }
+}
+
+function syncReplayDrawings() {
+  const core = coreChart
+  if (!core || state.mode !== 'replay') return
+  const head = state.bars[state.replayHead]?.timestamp ?? 0
+  syncingReplayDrawings = true
+  try {
+    for (const overlay of (core as ChartInternals).getChartStore().getOverlayStore().getInstances()) {
+      if (!replayDrawingVisibility.has(overlay.id)) replayDrawingVisibility.set(overlay.id, overlay.visible)
+      const visible = replayDrawingVisibility.get(overlay.id)! && overlay.points.every(({ timestamp }) => timestamp == null || timestamp <= head)
+      if (overlay.visible !== visible) core.overrideOverlay({ id: overlay.id, visible })
+    }
+  } finally { syncingReplayDrawings = false }
 }
 
 function restoreChartView(core: CoreChart, layout: ChartLayout) {
@@ -715,6 +752,7 @@ export function resizeChart() {
 export function unmountChart() {
   chartLayoutReady = false
   selectedDrawing = null
+  replayDrawingVisibility.clear()
   if (chartLayoutSaveTimer != null) window.clearTimeout(chartLayoutSaveTimer)
   chartLayoutSaveTimer = null
   pineGeneration++
@@ -759,6 +797,7 @@ function bindChartInteractions() {
     return
   }
   const core = coreChart
+  drawingOptions = { lock: false, visible: true, mode: OverlayMode.Normal }
   chartDefaultBarSpace = core.getBarSpace()
   const { icons, text } = core.getStyles().indicator.tooltip
   const openEye = icons.find(({ id }) => id === 'visible')?.icon
@@ -781,6 +820,7 @@ function bindChartInteractions() {
     if (data.iconId === 'pine-editor') togglePineEditor?.()
     if (data.iconId === 'pine-remove') clearPineScript()
   })
+  core.subscribeAction(ActionType.OnDataReady, syncReplayDrawings)
   ;[ActionType.OnZoom, ActionType.OnScroll, ActionType.OnVisibleRangeChange, ActionType.OnPaneDrag]
     .forEach((type) => core.subscribeAction(type, () => { syncTradeLayerPosition(); queueChartLayoutSave() }))
   const watchChange = () => window.setTimeout(queueChartLayoutSave, 0)
@@ -816,7 +856,21 @@ function bindChartInteractions() {
     return value
   }
   const overrideOverlay = core.overrideOverlay.bind(core)
-  core.overrideOverlay = (...args) => { overrideOverlay(...args); watchChange() }
+  core.overrideOverlay = (...args) => {
+    const option = args[0]
+    if (!option.id && !option.name && !option.groupId) {
+      if (option.mode != null) drawingOptions.mode = option.mode
+      if (option.lock != null) drawingOptions.lock = option.lock
+      if (option.visible != null) drawingOptions.visible = option.visible
+    }
+    overrideOverlay(...args)
+    watchChange()
+    if (option.visible != null && state.mode === 'replay' && !syncingReplayDrawings) {
+      if (option.id) replayDrawingVisibility.set(option.id, option.visible)
+      else (core as ChartInternals).getChartStore().getOverlayStore().getInstances().forEach(({ id }) => replayDrawingVisibility.set(id, option.visible!))
+      syncReplayDrawings()
+    }
+  }
   const removeOverlay = core.removeOverlay.bind(core)
   core.removeOverlay = (...args) => { removeOverlay(...args); watchChange() }
   const createIndicator = core.createIndicator.bind(core)
@@ -846,7 +900,10 @@ function bindChartInteractions() {
   if (drawingBar) {
     restoringTools = true
     try {
-      drawingTools.forEach((index, group) => {
+      const legacyExtras = [2, 4, 5, 9, 10]
+      const first = legacyExtras.includes(drawingTools[0] ?? -1) ? drawingTools[0] : 9
+      const selections = [first, 1, ...drawingTools.slice(2)]
+      selections.forEach((index, group) => {
         const button = drawingBar.querySelectorAll<HTMLElement>(':scope > .item[tabindex]')[group]
         if (!button || index == null) return
         button.querySelector<HTMLElement>('.icon-arrow')?.click()
@@ -884,6 +941,7 @@ function bindChartInteractions() {
     if (drawingRightClick) { drawingRightClick = false; event.preventDefault(); return }
     openChartContextMenu(event, root)
   }, { signal: chartEvents.signal })
+  syncReplayDrawings()
   resizeChart()
   renderTradeLayer()
 }
@@ -1520,6 +1578,7 @@ export function displayTypeSpecs(typeSpecs: string[] = []) {
 export function step() {
   if (state.mode !== 'replay') return
   state.replayHead = Math.min(state.replayEnd, state.replayHead + 1)
+  syncReplayDrawings()
   if (processPaperBar(state.paper, currentBar(), state.symbol.id, state.replayHead).length) markPaperChanged()
   refreshChart()
   updateReplayView()
@@ -1577,6 +1636,7 @@ function selectReplayBar(timestamp: number) {
   state.replayHead = index
   state.mode = 'replay'
   state.selectionTimestamp = timestamp
+  syncReplayDrawings()
   showReplayWorkspace()
   resetPriceAxis()
   refreshChart()
@@ -1597,6 +1657,7 @@ export function exitReplay(restoreLayout = true) {
     core?.removeOverlay()
   }
   stopPlayback()
+  replayDrawingVisibility.clear()
   state.mode = 'live'
   setPaperPanelOpen(state.paperPanelOpen, { save: false })
   state.orderDraft = null

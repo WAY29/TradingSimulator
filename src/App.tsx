@@ -1,6 +1,8 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { Fragment, lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Check, ChevronDown, ChevronLeft, CodeXml, Copy, FilePlus2, LayoutTemplate, LockKeyhole, LockKeyholeOpen, Pencil, Plus, Save, Trash2, X } from 'lucide-react'
 import { TIMEFRAMES } from './config'
+import { TREND_TOOLS } from './drawing-tools'
 import { activeOrderNumbers, projectedPnl, type PaperHistoryTrade } from './paper'
 import { savedPineScripts, selectPineScript, type SavedPineScript } from './pine-scripts'
 import { baseCurrency, providerLogoUrl, symbolLogoUrl } from './symbols'
@@ -233,6 +235,7 @@ function ChartWorkspace({ controller }: { controller: TerminalController | null 
   return (
     <div className="tv-main">
       <ChartHost key={controller?.getChartLayouts().activeId} controller={controller} />
+      <TrendTools controller={controller} />
       <div className="replay-watermark" id="replay-watermark" hidden={state?.mode !== 'replay'}><span>◀◀</span> Replay</div>
       <div className="replay-future-mask" id="replay-future-mask" hidden={state?.mode !== 'select'} style={{ left: state?.replaySelectorLeft ?? 0 }} />
       <div className="replay-selector-line" id="replay-selector-line" hidden={state?.mode !== 'select' || state?.replaySelectorLeft == null} style={{ left: state?.replaySelectorLeft ?? 0 }}><span>✂</span></div>
@@ -256,6 +259,48 @@ function ChartWorkspace({ controller }: { controller: TerminalController | null 
       <Watchlist controller={controller} />
     </div>
   )
+}
+
+const drawingIconsUrl = '/icons/tradingview-drawing-tools.svg#'
+
+function TrendIcon({ icon }: { icon: string }) {
+  return <svg className="trend-tool-icon" width="28" height="28" fill="currentColor" aria-hidden="true"><use href={`${drawingIconsUrl}${icon}`} width="100%" height="100%" /></svg>
+}
+
+function TrendTools({ controller }: { controller: TerminalController | null }) {
+  const [open, setOpen] = useState(false)
+  const [drawingBar, setDrawingBar] = useState<HTMLElement | null>(null)
+  const group = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const workspace = document.querySelector('.tv-main')
+    if (!workspace) return
+    const update = () => setDrawingBar(workspace.querySelector<HTMLElement>('.chart-host .klinecharts-pro-content > .klinecharts-pro-drawing-bar'))
+    const observer = new MutationObserver(update)
+    observer.observe(workspace, { childList: true, subtree: true })
+    update()
+    return () => observer.disconnect()
+  }, [])
+  useEffect(() => {
+    if (!open) return
+    const dismiss = (event: MouseEvent) => { if (!group.current?.contains(event.target as Node)) setOpen(false) }
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setOpen(false) }
+    document.addEventListener('click', dismiss)
+    document.addEventListener('keydown', escape)
+    return () => { document.removeEventListener('click', dismiss); document.removeEventListener('keydown', escape) }
+  }, [open])
+  const active = controller?.getTrendTool() ?? 'segment'
+  const activeTool = TREND_TOOLS.find(({ name }) => name === active) ?? TREND_TOOLS[0]
+  const disabled = !controller || controller.getControllerState().mode === 'select'
+  if (!drawingBar) return null
+  return createPortal(<div className="item trend-tool-group" ref={group}>
+    <button className="trend-tool-main" title={activeTool.label} aria-label={activeTool.label} disabled={disabled} onClick={() => controller?.selectTrendTool(active)}><span className="icon-overlay"><TrendIcon icon={activeTool.icon} /></span></button>
+    <button className="icon-arrow trend-tool-expand" title="趋势线工具" aria-label="展开趋势线工具" aria-expanded={open} disabled={disabled} onClick={() => setOpen(!open)}><TrendIcon icon="toolbar-linetool-group-trend-line-arrow" /></button>
+    {open && <ul className="klinecharts-pro-list list trend-tool-menu" role="group" aria-label="趋势工具">{TREND_TOOLS.map(({ name, label, icon }, index) => {
+      const section = index === 0 ? '线' : index === 9 ? '通道' : index === 13 ? '分叉线' : null
+      const select = () => { controller?.selectTrendTool(name); setOpen(false) }
+      return <Fragment key={name}>{section && <li className="trend-tool-heading">{section}</li>}<li role="button" tabIndex={0} title={label} className={name === active ? 'active' : ''} onClick={select} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select() } }}><span className="icon-overlay"><TrendIcon icon={icon} /></span><span style={{ paddingLeft: 8 }}>{label}</span></li></Fragment>
+    })}</ul>}
+  </div>, drawingBar)
 }
 
 function TradeLayer({ controller }: { controller: TerminalController | null }) {

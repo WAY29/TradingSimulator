@@ -95,6 +95,27 @@ button:disabled { cursor: not-allowed; opacity: .38; }
 .chart-host.klinecharts-pro { height: 100% !important; min-height: 0; }
 .chart-host .klinecharts-pro-period-bar { display: none; }
 .chart-host .klinecharts-pro-content { height: 100%; }
+.chart-host .klinecharts-pro-drawing-bar > .item:first-of-type { margin-top: 40px; }
+.chart-host .klinecharts-pro-drawing-bar > .item:first-of-type .list li:nth-child(1),
+.chart-host .klinecharts-pro-drawing-bar > .item:first-of-type .list li:nth-child(2),
+.chart-host .klinecharts-pro-drawing-bar > .item:first-of-type .list li:nth-child(4),
+.chart-host .klinecharts-pro-drawing-bar > .item:first-of-type .list li:nth-child(7),
+.chart-host .klinecharts-pro-drawing-bar > .item:first-of-type .list li:nth-child(8),
+.chart-host .klinecharts-pro-drawing-bar > .item:first-of-type .list li:nth-child(9) { display: none; }
+.chart-host .klinecharts-pro-drawing-bar > .item[tabindex]:nth-of-type(2) .list li:first-child { display: none; }
+.chart-host .klinecharts-pro-drawing-bar .trend-tool-group { position: absolute; top: 8px; left: 0; z-index: 46; width: 51px; margin-top: 0; }
+.trend-tool-group button { padding: 0; border: 0; color: inherit; background: transparent; cursor: pointer; }
+.trend-tool-group button:disabled { cursor: default; opacity: .45; }
+.trend-tool-main { display: block; width: 32px; height: 32px; }
+.trend-tool-group .icon-overlay { display: grid; place-items: center; }
+.trend-tool-group .icon-overlay .trend-tool-icon { width: 28px; height: 28px; }
+.chart-host .klinecharts-pro-drawing-bar .trend-tool-group .icon-arrow .trend-tool-icon { flex-shrink: 0; width: 6px; height: 10px; }
+.trend-tool-group:focus-within .icon-arrow { opacity: 1; }
+.chart-host .klinecharts-pro-drawing-bar .trend-tool-group .trend-tool-menu { width: 200px; max-height: min(560px, calc(100vh - 175px)); }
+.trend-tool-menu .trend-tool-heading { height: 28px; color: var(--klinecharts-pro-text-second-color); font-size: 12px; cursor: default; }
+.trend-tool-menu .trend-tool-heading:hover { background: transparent; }
+.trend-tool-menu li.active { color: var(--klinecharts-pro-primary-color); }
+.trend-tool-menu li[role="button"]:focus-visible { outline: 2px solid var(--klinecharts-pro-primary-color); outline-offset: -2px; }
 .drawing-toolbar { position: absolute; top: 12px; right: calc(360px + 76px); z-index: 45; display: flex; align-items: center; gap: 4px; width: 244px; height: 42px; padding: 4px 6px; border: 1px solid #363a45; border-radius: 6px; background: #1e222d; box-shadow: 0 6px 18px rgba(0, 0, 0, .5); }
 .terminal.pine-open .drawing-toolbar { right: 76px; }
 .drawing-toolbar input[type="color"] { width: 30px; height: 30px; padding: 3px; border: 0; border-radius: 3px; background: transparent; cursor: pointer; }
