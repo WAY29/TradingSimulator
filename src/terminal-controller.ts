@@ -1,7 +1,7 @@
 import { KLineChartPro } from '@klinecharts/pro'
 import type { Datafeed, DatafeedSubscribeCallback, SymbolInfo } from '@klinecharts/pro'
-import { ActionType, dispose as disposeKLineChart, getSupportedIndicators, getSupportedOverlays, init as getKLineChart, registerIndicator } from 'klinecharts'
-import type { Chart, Coordinate, Indicator, KLineData, Overlay, Point } from 'klinecharts'
+import { ActionType, dispose as disposeKLineChart, getSupportedIndicators, getSupportedOverlays, init as getKLineChart, LineType, registerIndicator } from 'klinecharts'
+import type { Chart, Coordinate, Indicator, KLineData, Overlay, OverlayEvent, Point } from 'klinecharts'
 import { PineClient } from './pine-client'
 import { drawPine, pineLegend, pineSubPrecision } from './pine-renderer'
 import type { PineResult } from './pine'
@@ -69,6 +69,12 @@ type SavedState = { paper: Partial<PaperAccount>; session: ReplaySession }
 
 const listeners = new Set<() => void>()
 const chartLayouts = readChartLayouts(localStorage, loadSelectedMarket(), loadSelectedTimeframe())
+const DRAWING_TOOLS_KEY = 'trading-simulator:drawing-tools'
+let drawingTools: Array<number | null> = []
+try {
+  const saved: unknown = JSON.parse(localStorage.getItem(DRAWING_TOOLS_KEY) || 'null')
+  if (Array.isArray(saved)) drawingTools = saved.slice(0, 5).map((item) => Number.isInteger(item) && item >= 0 ? item as number : null)
+} catch {}
 
 function activeChartLayout() {
   return chartLayouts.items.find(({ id }) => id === chartLayouts.activeId)!
@@ -148,6 +154,67 @@ let chartLayoutReady = false
 let chartDefaultBarSpace = 8
 let chartLayoutSaveTimer: number | null = null
 let chartContextSerial = 0
+let selectedDrawing: string | null = null
+
+export function getSelectedDrawing() {
+  const selection = selectedDrawing
+  const core = coreChart
+  if (!selection || !core || state.mode === 'select') return null
+  const overlay = core.getOverlayById(selection)
+  if (!overlay) return null
+  const styles = core.getStyles().overlay
+  const shape = overlay.name === 'circle' || overlay.name.endsWith('Circle') ? 'circle'
+    : ['rect', 'parallelogram', 'triangle'].includes(overlay.name) ? 'polygon' : 'line'
+  const color = shape === 'line' ? overlay.styles?.line?.color ?? styles.line.color
+    : overlay.styles?.[shape]?.borderColor ?? styles[shape].borderColor
+  const width = shape === 'line' ? overlay.styles?.line?.size ?? styles.line.size
+    : overlay.styles?.[shape]?.borderSize ?? styles[shape].borderSize
+  const lineType = shape === 'line' ? overlay.styles?.line?.style ?? styles.line.style
+    : overlay.styles?.[shape]?.borderStyle ?? styles[shape].borderStyle
+  return { id: selection, color, width, dashed: lineType === LineType.Dashed, lock: overlay.lock }
+}
+
+export function setDrawingColor(color: string) {
+  if (!/^#[0-9a-f]{6}$/i.test(color) || !selectedDrawing) return
+  coreChart?.overrideOverlay({ id: selectedDrawing, styles: {
+    line: { color }, arc: { color }, polygon: { borderColor: color, color: `${color}26` },
+    rect: { borderColor: color, color: `${color}40` }, circle: { borderColor: color, color: `${color}40` },
+  } })
+  notify()
+}
+
+export function setDrawingWidth(width: number) {
+  if (!Number.isInteger(width) || width < 1 || width > 5 || !selectedDrawing) return
+  coreChart?.overrideOverlay({ id: selectedDrawing, styles: {
+    line: { size: width }, arc: { size: width }, polygon: { borderSize: width }, rect: { borderSize: width }, circle: { borderSize: width },
+  } })
+  notify()
+}
+
+export function toggleDrawingStyle() {
+  if (!selectedDrawing) return
+  const dashed = getSelectedDrawing()?.dashed
+  const style = dashed ? LineType.Solid : LineType.Dashed
+  coreChart?.overrideOverlay({ id: selectedDrawing, styles: {
+    line: { style }, arc: { style },
+    polygon: { borderStyle: style }, rect: { borderStyle: style }, circle: { borderStyle: style },
+  } })
+  notify()
+}
+
+export function toggleDrawingLock() {
+  const overlay = selectedDrawing && coreChart?.getOverlayById(selectedDrawing)
+  if (!overlay) return
+  coreChart?.overrideOverlay({ id: overlay.id, lock: !overlay.lock })
+  notify()
+}
+
+export function deleteSelectedDrawing() {
+  if (!selectedDrawing) return
+  coreChart?.removeOverlay(selectedDrawing)
+  selectedDrawing = null
+  notify()
+}
 
 export function setPineEditorToggle(callback: (() => void) | null) {
   togglePineEditor = callback
@@ -647,6 +714,7 @@ export function resizeChart() {
 
 export function unmountChart() {
   chartLayoutReady = false
+  selectedDrawing = null
   if (chartLayoutSaveTimer != null) window.clearTimeout(chartLayoutSaveTimer)
   chartLayoutSaveTimer = null
   pineGeneration++
@@ -717,7 +785,36 @@ function bindChartInteractions() {
     .forEach((type) => core.subscribeAction(type, () => { syncTradeLayerPosition(); queueChartLayoutSave() }))
   const watchChange = () => window.setTimeout(queueChartLayoutSave, 0)
   const createOverlay = core.createOverlay.bind(core)
-  core.createOverlay = (...args) => { const value = createOverlay(...args); watchChange(); return value }
+  let restoringTools = false
+  let drawingRightClick = false
+  const selectDrawing = ({ overlay }: OverlayEvent) => {
+    if (state.mode === 'select') return false
+    selectedDrawing = overlay.id
+    state.contextMenu = null
+    notify()
+    return true
+  }
+  core.createOverlay = (...args) => {
+    if (restoringTools) return null
+    const value = createOverlay(...args)
+    for (const id of Array.isArray(value) ? value : [value]) {
+      if (!id) continue
+      core.overrideOverlay({ id,
+        onSelected: selectDrawing,
+        onDeselected: ({ overlay }) => { if (selectedDrawing === overlay.id) { selectedDrawing = null; notify() } return true },
+        onRemoved: ({ overlay }) => { if (selectedDrawing === overlay.id) { selectedDrawing = null; notify() } return true },
+        onRightClick: (event) => {
+          if (event.overlay.currentStep !== -1) return false
+          drawingRightClick = true
+          window.setTimeout(() => { drawingRightClick = false }, 200)
+          selectDrawing(event)
+          return true
+        },
+      })
+    }
+    watchChange()
+    return value
+  }
   const overrideOverlay = core.overrideOverlay.bind(core)
   core.overrideOverlay = (...args) => { overrideOverlay(...args); watchChange() }
   const removeOverlay = core.removeOverlay.bind(core)
@@ -734,6 +831,29 @@ function bindChartInteractions() {
   core.removeIndicator = (...args) => { removeIndicator(...args); if (args[1] !== 'PINE_SCRIPT') watchChange() }
   const setPaneOptions = core.setPaneOptions.bind(core)
   core.setPaneOptions = (...args) => { setPaneOptions(...args); watchChange() }
+  const drawingBar = chartContainer?.querySelector<HTMLElement>('.klinecharts-pro-drawing-bar')
+  drawingBar?.addEventListener('click', (event) => {
+    if (restoringTools) return
+    const item = (event.target as HTMLElement).closest('li')
+    const group = item?.closest('.item[tabindex]')
+    if (!item || !group) return
+    const groups = [...drawingBar.querySelectorAll(':scope > .item[tabindex]')]
+    const index = groups.indexOf(group)
+    if (index < 0 || index >= 5) return
+    drawingTools[index] = [...item.parentElement!.children].indexOf(item)
+    try { localStorage.setItem(DRAWING_TOOLS_KEY, JSON.stringify(drawingTools)) } catch {}
+  }, { signal: chartEvents.signal })
+  if (drawingBar) {
+    restoringTools = true
+    try {
+      drawingTools.forEach((index, group) => {
+        const button = drawingBar.querySelectorAll<HTMLElement>(':scope > .item[tabindex]')[group]
+        if (!button || index == null) return
+        button.querySelector<HTMLElement>('.icon-arrow')?.click()
+        button.querySelectorAll<HTMLElement>('.list li')[index]?.click()
+      })
+    } finally { restoringTools = false }
+  }
   document.addEventListener('pointerup', queueChartLayoutSave, { signal: chartEvents.signal })
   document.addEventListener('keyup', queueChartLayoutSave, { signal: chartEvents.signal })
   document.addEventListener('change', queueChartLayoutSave, { signal: chartEvents.signal })
@@ -760,7 +880,10 @@ function bindChartInteractions() {
     const timestamp = pointerTimestamp(event, root) || state.selectionTimestamp
     if (timestamp) selectReplayBar(timestamp)
   }, { signal: chartEvents.signal })
-  root.addEventListener('contextmenu', (event) => openChartContextMenu(event, root), { signal: chartEvents.signal })
+  root.addEventListener('contextmenu', (event) => {
+    if (drawingRightClick) { drawingRightClick = false; event.preventDefault(); return }
+    openChartContextMenu(event, root)
+  }, { signal: chartEvents.signal })
   resizeChart()
   renderTradeLayer()
 }
@@ -1434,6 +1557,7 @@ export function startBarSelection() {
   const wasReplay = state.mode === 'replay'
   if (state.mode === 'live') flushChartLayout()
   stopPlayback()
+  selectedDrawing = null
   state.mode = 'select'
   state.selectionTimestamp = null
   state.replaySelectorLeft = null
@@ -1497,6 +1621,7 @@ export function exitReplay(restoreLayout = true) {
 export function openChartContextMenu(event: MouseEvent, root: HTMLElement) {
   if (state.mode === 'select') return
   event.preventDefault()
+  selectedDrawing = null
   const point = coreChart?.convertFromPixel(
     { y: event.clientY - root.getBoundingClientRect().top },
     { paneId: 'candle_pane', absolute: true },

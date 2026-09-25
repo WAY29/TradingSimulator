@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { Check, ChevronDown, ChevronLeft, CodeXml, Copy, FilePlus2, LayoutTemplate, Pencil, Plus, Save, Trash2, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronLeft, CodeXml, Copy, FilePlus2, LayoutTemplate, LockKeyhole, LockKeyholeOpen, Pencil, Plus, Save, Trash2, X } from 'lucide-react'
 import { TIMEFRAMES } from './config'
 import { activeOrderNumbers, projectedPnl, type PaperHistoryTrade } from './paper'
 import { savedPineScripts, selectPineScript, type SavedPineScript } from './pine-scripts'
@@ -229,6 +229,7 @@ function ConfirmDialog({ title, message, action, onConfirm, onClose }: { title: 
 function ChartWorkspace({ controller }: { controller: TerminalController | null }) {
   const state = controller?.getControllerState()
   const context = state?.contextMenu
+  const drawing = controller?.getSelectedDrawing()
   return (
     <div className="tv-main">
       <ChartHost key={controller?.getChartLayouts().activeId} controller={controller} />
@@ -236,6 +237,13 @@ function ChartWorkspace({ controller }: { controller: TerminalController | null 
       <div className="replay-future-mask" id="replay-future-mask" hidden={state?.mode !== 'select'} style={{ left: state?.replaySelectorLeft ?? 0 }} />
       <div className="replay-selector-line" id="replay-selector-line" hidden={state?.mode !== 'select' || state?.replaySelectorLeft == null} style={{ left: state?.replaySelectorLeft ?? 0 }}><span>✂</span></div>
       <TradeLayer controller={controller} />
+      {drawing && <div id="drawing-toolbar" className="drawing-toolbar" role="toolbar" aria-label="画线设置" onContextMenu={(event) => event.preventDefault()}>
+        <input type="color" title="颜色" aria-label="画线颜色" value={/^#[0-9a-f]{6}$/i.test(drawing.color) ? drawing.color : '#1677ff'} onChange={(event) => controller?.setDrawingColor(event.target.value)} />
+        <select aria-label="线宽" title="线宽" value={drawing.width} onChange={(event) => controller?.setDrawingWidth(Number(event.target.value))}>{[1, 2, 3, 4, 5].map((width) => <option key={width} value={width}>{width}px</option>)}</select>
+        <select aria-label="线型" title="线型" value={drawing.dashed ? 'dashed' : 'solid'} onChange={() => controller?.toggleDrawingStyle()}><option value="solid">实线</option><option value="dashed">虚线</option></select>
+        <button title={drawing.lock ? '解锁画线' : '锁定画线'} aria-label={drawing.lock ? '解锁画线' : '锁定画线'} onClick={() => controller?.toggleDrawingLock()}>{drawing.lock ? <LockKeyhole size={18} /> : <LockKeyholeOpen size={18} />}</button>
+        <button title="删除画线" aria-label="删除画线" onClick={() => controller?.deleteSelectedDrawing()}><Trash2 size={18} /></button>
+      </div>}
       <div className="chart-context-menu" id="chart-context-menu" hidden={!context} style={context ? { left: context.left, top: context.top } : undefined}>
         {context ? <>
           <button onClick={() => { navigator.clipboard.writeText(String(context.price)).catch(() => {}); controller?.closeChartContextMenu() }}>Copy price <strong>{controller?.formatPrice(context.price, undefined)}</strong></button>
